@@ -61,7 +61,7 @@ namespace fenrir {
         }
 
         // Execute stored procedure
-        [[nodiscard]] std::expected<query_result, database_error> execute() {
+        [[nodiscard]] query_result execute() {
             // Build parameter list for PostgreSQL function call
             std::vector<std::string> param_placeholders;
             std::vector<std::string> param_values;
@@ -77,10 +77,7 @@ namespace fenrir {
             if (param_placeholders.empty()) {
                 sql = std::format("SELECT * FROM {}()", proc_name_);
                 auto result = conn_.execute(sql);
-                if (!result) {
-                    return std::unexpected(result.error());
-                }
-                return query_result(*result);
+                return query_result(result);
             } else {
                 sql = std::format("SELECT * FROM {}({})", 
                                  proc_name_,
@@ -88,26 +85,20 @@ namespace fenrir {
                 
                 // Execute with parameters
                 auto result = execute_with_params(sql, param_values);
-                if (!result) {
-                    return std::unexpected(result.error());
-                }
-                return query_result(*result);
+                return query_result(result);
             }
         }
 
         // Execute as a function returning single value
         template<typename T>
-        [[nodiscard]] std::expected<std::optional<T>, database_error> execute_scalar() {
+        [[nodiscard]] std::optional<T> execute_scalar() {
             auto result = execute();
-            if (!result) {
-                return std::unexpected(result.error());
+
+            if (result.row_count() == 0 || result.column_count() == 0) {
+                return std::nullopt;
             }
 
-            if (result->row_count() == 0 || result->column_count() == 0) {
-                return std::optional<T>{};
-            }
-
-            return result->get<T>(0, 0);
+            return result.get<T>(0, 0);
         }
 
         // Clear all parameters
@@ -151,7 +142,7 @@ namespace fenrir {
             return result;
         }
 
-        std::expected<PGresult*, database_error> execute_with_params(
+        PGresult* execute_with_params(
             std::string_view sql, const std::vector<std::string>& values) {
             
             std::vector<const char*> param_ptrs;
@@ -171,9 +162,9 @@ namespace fenrir {
             );
 
             if (!result) {
-                return std::unexpected(database_error{
+                throw database_error{
                     std::format("Stored procedure execution failed: {}", conn_.last_error())
-                });
+                };
             }
 
             ExecStatusType status = PQresultStatus(result);
@@ -181,7 +172,7 @@ namespace fenrir {
                 std::string error_msg = PQresultErrorMessage(result);
                 std::string sql_state = PQresultErrorField(result, PG_DIAG_SQLSTATE);
                 PQclear(result);
-                return std::unexpected(database_error{std::move(error_msg), std::move(sql_state)});
+                throw database_error{std::move(error_msg), std::move(sql_state)};
             }
 
             return result;

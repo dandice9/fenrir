@@ -5,7 +5,7 @@
 #include <string_view>
 #include <memory>
 #include <optional>
-#include <expected>
+#include <variant>
 #include <concepts>
 #include <format>
 #include <source_location>
@@ -14,14 +14,15 @@
 namespace fenrir {
 
     // Error type for database operations
-    struct database_error {
-        std::string message;
+    struct database_error : public std::runtime_error {
         std::string sql_state;
         std::source_location location;
         
         database_error(std::string msg, std::string state = "", 
                       std::source_location loc = std::source_location::current())
-            : message(std::move(msg)), sql_state(std::move(state)), location(loc) {}
+            : std::runtime_error(msg), sql_state(std::move(state)), location(loc) {}
+        
+        std::string message() const { return what(); }
     };
 
     // Connection status enum
@@ -102,16 +103,16 @@ namespace fenrir {
         }
 
         // Execute a simple query (no parameters)
-        [[nodiscard]] std::expected<PGresult*, database_error> execute(std::string_view query) {
+        [[nodiscard]] PGresult* execute(std::string_view query) {
             if (!is_connected()) {
-                return std::unexpected(database_error{"Connection is not valid"});
+                throw database_error{"Connection is not valid"};
             }
 
             PGresult* result = PQexec(conn_, query.data());
             if (!result) {
-                return std::unexpected(database_error{
+                throw database_error{
                     std::format("Query execution failed: {}", PQerrorMessage(conn_))
-                });
+                };
             }
 
             ExecStatusType status = PQresultStatus(result);
@@ -119,7 +120,7 @@ namespace fenrir {
                 std::string error_msg = PQresultErrorMessage(result);
                 std::string sql_state = PQresultErrorField(result, PG_DIAG_SQLSTATE);
                 PQclear(result);
-                return std::unexpected(database_error{std::move(error_msg), std::move(sql_state)});
+                throw database_error{std::move(error_msg), std::move(sql_state)};
             }
 
             return result;
@@ -127,11 +128,11 @@ namespace fenrir {
 
         // Execute parameterized query
         template<typename... Args>
-        [[nodiscard]] std::expected<PGresult*, database_error> execute_params(
+        [[nodiscard]] PGresult* execute_params(
             std::string_view query, Args&&... args) {
             
             if (!is_connected()) {
-                return std::unexpected(database_error{"Connection is not valid"});
+                throw database_error{"Connection is not valid"};
             }
 
             std::vector<std::string> param_values;
@@ -155,9 +156,9 @@ namespace fenrir {
             );
 
             if (!result) {
-                return std::unexpected(database_error{
+                throw database_error{
                     std::format("Parameterized query execution failed: {}", PQerrorMessage(conn_))
-                });
+                };
             }
 
             ExecStatusType status = PQresultStatus(result);
@@ -165,7 +166,7 @@ namespace fenrir {
                 std::string error_msg = PQresultErrorMessage(result);
                 std::string sql_state = PQresultErrorField(result, PG_DIAG_SQLSTATE);
                 PQclear(result);
-                return std::unexpected(database_error{std::move(error_msg), std::move(sql_state)});
+                throw database_error{std::move(error_msg), std::move(sql_state)};
             }
 
             return result;

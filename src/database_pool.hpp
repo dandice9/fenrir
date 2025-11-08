@@ -106,7 +106,7 @@ namespace fenrir {
         database_pool& operator=(database_pool&&) = delete;
 
         // Acquire connection from pool
-        [[nodiscard]] std::expected<pooled_connection, database_error> acquire(
+        [[nodiscard]] pooled_connection acquire(
             std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
             
             using namespace std::chrono;
@@ -116,7 +116,7 @@ namespace fenrir {
 
             while (true) {
                 if (shutdown_) {
-                    return std::unexpected(database_error{"Pool is shutting down"});
+                    throw database_error{"Pool is shutting down"};
                 }
 
                 // Try to get available connection
@@ -148,25 +148,21 @@ namespace fenrir {
                 // Try to create new connection if under max limit
                 size_t total = active_connections_ + available_connections_.size();
                 if (total < config_.max_connections) {
-                    try {
-                        auto conn = create_connection();
-                        ++active_connections_;
-                        
-                        return pooled_connection(
-                            std::move(conn),
-                            [this](std::unique_ptr<database_connection> c) {
-                                this->return_connection(std::move(c));
-                            }
-                        );
-                    } catch (const database_error& e) {
-                        return std::unexpected(e);
-                    }
+                    auto conn = create_connection();
+                    ++active_connections_;
+                    
+                    return pooled_connection(
+                        std::move(conn),
+                        [this](std::unique_ptr<database_connection> c) {
+                            this->return_connection(std::move(c));
+                        }
+                    );
                 }
 
                 // Wait for connection to become available
                 auto now = steady_clock::now();
                 if (now >= deadline) {
-                    return std::unexpected(database_error{"Timeout waiting for connection"});
+                    throw database_error{"Timeout waiting for connection"};
                 }
 
                 cv_.wait_until(lock, deadline);

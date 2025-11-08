@@ -1,4 +1,5 @@
 #pragma once
+
 #include <string>
 #include <string_view>
 #include <memory>
@@ -31,26 +32,24 @@ namespace fenrir {
     public:
         savepoint(database_connection& conn, std::string_view name)
             : conn_(conn), name_(name), released_(false) {
-            auto result = conn_.execute(std::format("SAVEPOINT {}", name_));
-            if (!result) {
-                throw result.error();
-            }
+            PQclear(conn_.execute(std::format("SAVEPOINT {}", name_)));
         }
 
         ~savepoint() {
             if (!released_) {
                 // Silently rollback to savepoint on destruction if not released
-                conn_.execute(std::format("ROLLBACK TO SAVEPOINT {}", name_));
+                try {
+                    PQclear(conn_.execute(std::format("ROLLBACK TO SAVEPOINT {}", name_)));
+                } catch (...) {
+                    // Ignore errors in destructor
+                }
             }
         }
 
         // Release savepoint (commit)
         void release() {
             if (!released_) {
-                auto result = conn_.execute(std::format("RELEASE SAVEPOINT {}", name_));
-                if (!result) {
-                    throw result.error();
-                }
+                PQclear(conn_.execute(std::format("RELEASE SAVEPOINT {}", name_)));
                 released_ = true;
             }
         }
@@ -58,10 +57,7 @@ namespace fenrir {
         // Rollback to savepoint
         void rollback() {
             if (!released_) {
-                auto result = conn_.execute(std::format("ROLLBACK TO SAVEPOINT {}", name_));
-                if (!result) {
-                    throw result.error();
-                }
+                PQclear(conn_.execute(std::format("ROLLBACK TO SAVEPOINT {}", name_)));
             }
         }
 
@@ -102,10 +98,7 @@ namespace fenrir {
             std::string begin_cmd = std::format("BEGIN TRANSACTION ISOLATION LEVEL {} {} {}",
                                                 isolation_str, mode_str, defer_str);
             
-            auto result = conn_.execute(begin_cmd);
-            if (!result) {
-                throw result.error();
-            }
+            PQclear(conn_.execute(begin_cmd));
         }
 
         ~database_transaction() {
@@ -135,10 +128,7 @@ namespace fenrir {
                 throw database_error{"Transaction already finalized"};
             }
 
-            auto result = conn_.execute("COMMIT");
-            if (!result) {
-                throw result.error();
-            }
+            PQclear(conn_.execute("COMMIT"));
             committed_ = true;
         }
 
@@ -148,10 +138,7 @@ namespace fenrir {
                 throw database_error{"Transaction already finalized"};
             }
 
-            auto result = conn_.execute("ROLLBACK");
-            if (!result) {
-                throw result.error();
-            }
+            PQclear(conn_.execute("ROLLBACK"));
             rolled_back_ = true;
         }
 
@@ -164,32 +151,26 @@ namespace fenrir {
         }
 
         // Execute query within transaction
-        [[nodiscard]] std::expected<query_result, database_error> execute(std::string_view sql) {
+        [[nodiscard]] query_result execute(std::string_view sql) {
             if (committed_ || rolled_back_) {
-                return std::unexpected(database_error{"Transaction already finalized"});
+                throw database_error{"Transaction already finalized"};
             }
 
             auto result = conn_.execute(sql);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            return query_result(*result);
+            return query_result(result);
         }
 
         // Execute parameterized query within transaction
         template<typename... Args>
-        [[nodiscard]] std::expected<query_result, database_error> execute_params(
+        [[nodiscard]] query_result execute_params(
             std::string_view sql, Args&&... args) {
             
             if (committed_ || rolled_back_) {
-                return std::unexpected(database_error{"Transaction already finalized"});
+                throw database_error{"Transaction already finalized"};
             }
 
             auto result = conn_.execute_params(sql, std::forward<Args>(args)...);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            return query_result(*result);
+            return query_result(result);
         }
 
         // Check transaction state

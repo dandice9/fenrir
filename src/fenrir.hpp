@@ -38,8 +38,6 @@
  * See README.md for full documentation.
  */
 
-// Compatibility layer for std::expected
-
 // Core components
 #include "database_connection.hpp"
 #include "database_query.hpp"

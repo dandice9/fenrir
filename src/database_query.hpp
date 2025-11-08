@@ -221,42 +221,30 @@ namespace fenrir {
         }
 
         // Execute the built query
-        [[nodiscard]] std::expected<query_result, database_error> execute() {
+        [[nodiscard]] query_result execute() {
             auto result = conn_.execute(query_);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            return query_result(*result);
+            return query_result(result);
         }
 
         // Execute with parameters
         template<typename... Args>
-        [[nodiscard]] std::expected<query_result, database_error> execute(Args&&... args) {
+        [[nodiscard]] query_result execute(Args&&... args) {
             auto result = conn_.execute_params(query_, std::forward<Args>(args)...);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            return query_result(*result);
+            return query_result(result);
         }
 
         // Direct SQL execution
-        [[nodiscard]] std::expected<query_result, database_error> raw(std::string_view sql) {
+        [[nodiscard]] query_result raw(std::string_view sql) {
             auto result = conn_.execute(sql);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            return query_result(*result);
+            return query_result(result);
         }
 
         // Parameterized SQL execution
         template<typename... Args>
-        [[nodiscard]] std::expected<query_result, database_error> raw_params(
+        [[nodiscard]] query_result raw_params(
             std::string_view sql, Args&&... args) {
             auto result = conn_.execute_params(sql, std::forward<Args>(args)...);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            return query_result(*result);
+            return query_result(result);
         }
 
         // Get the current query string
