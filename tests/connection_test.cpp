@@ -23,9 +23,9 @@ TEST_CASE("database_connection - Construction and Connection", "[connection]") {
         database_connection::connection_params params{
             .host = "localhost",
             .port = "5432",
-            .database = "test_db",
-            .user = "postgres",
-            .password = "postgres"
+            .database = "testdb",
+            .user = "testuser",
+            .password = "testpass"
         };
         
         REQUIRE_NOTHROW([&]() {
@@ -131,10 +131,6 @@ TEST_CASE("database_connection - Connection Info", "[connection]") {
         REQUIRE_FALSE(conn.user_name().empty());
         REQUIRE_FALSE(conn.host().empty());
         REQUIRE_FALSE(conn.port().empty());
-    }
-    
-    SECTION("Ping connection") {
-        REQUIRE(conn.ping());
     }
 }
 

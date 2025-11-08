@@ -60,8 +60,8 @@ namespace fenrir {
         int minor = FENRIR_VERSION_MINOR;
         int patch = FENRIR_VERSION_PATCH;
         
-        [[nodiscard]] constexpr const char* string() const noexcept {
-            return "1.0.0";
+        [[nodiscard]] std::string string() const {
+            return std::format("{}.{}.{}", major, minor, patch);
         }
     } version;
 
