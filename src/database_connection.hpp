@@ -10,8 +10,18 @@
 #include <format>
 #include <source_location>
 #include <chrono>
+#include <boost/asio.hpp>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <coroutine>
 
 namespace fenrir {
+
+    namespace net = boost::asio;
+
+    // Forward declaration
+    class query_result;
 
     // Error type for database operations
     struct database_error : public std::runtime_error {
@@ -77,12 +87,14 @@ namespace fenrir {
         database_connection& operator=(const database_connection&) = delete;
         
         database_connection(database_connection&& other) noexcept
-            : conn_(std::exchange(other.conn_, nullptr)) {}
+            : conn_(std::exchange(other.conn_, nullptr))
+            , ioc_(std::exchange(other.ioc_, nullptr)) {}
         
         database_connection& operator=(database_connection&& other) noexcept {
             if (this != &other) {
                 close();
                 conn_ = std::exchange(other.conn_, nullptr);
+                ioc_ = std::exchange(other.ioc_, nullptr);
             }
             return *this;
         }
@@ -221,6 +233,36 @@ namespace fenrir {
             }
         }
 
+        // === ASYNC METHODS (require io_context) ===
+        // Implementations in database_connection_async.hpp to avoid circular dependency
+        
+        // Set io_context for async operations
+        void set_io_context(net::io_context& ioc) noexcept {
+            ioc_ = &ioc;
+        }
+
+        // Async query execution using coroutines
+        [[nodiscard]] net::awaitable<query_result> async_execute(std::string_view query);
+
+        // Async parameterized query execution
+        template<typename... Args>
+        [[nodiscard]] net::awaitable<query_result> async_execute_params(
+            std::string_view query, Args&&... args);
+
+        // Async prepare statement
+        [[nodiscard]] net::awaitable<void> async_prepare(
+            std::string_view name, std::string_view query);
+
+        // Async execute prepared statement
+        template<typename... Args>
+        [[nodiscard]] net::awaitable<query_result> async_execute_prepared(
+            std::string_view name, Args&&... args);
+
+        // Get the io_context (if set)
+        [[nodiscard]] net::io_context* get_io_context() noexcept {
+            return ioc_;
+        }
+
     private:
         void connect(std::string_view conn_str) {
             conn_ = PQconnectdb(conn_str.data());
@@ -250,7 +292,52 @@ namespace fenrir {
             }
         }
 
+        // Wait for query result asynchronously using polling
+        [[nodiscard]] net::awaitable<PGresult*> wait_for_result() {
+            auto executor = co_await net::this_coro::executor;
+            net::steady_timer timer(executor);
+            
+            while (true) {
+                // Check if result is ready (non-blocking)
+                if (PQconsumeInput(native_handle()) == 0) {
+                    throw database_error{
+                        std::format("Failed to consume input: {}", last_error())
+                    };
+                }
+
+                if (PQisBusy(native_handle()) == 0) {
+                    // Result is ready
+                    PGresult* result = PQgetResult(native_handle());
+                    
+                    if (!result) {
+                        throw database_error{"Query returned no result"};
+                    }
+
+                    ExecStatusType status = PQresultStatus(result);
+                    if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+                        std::string error_msg = PQresultErrorMessage(result);
+                        std::string sql_state = PQresultErrorField(result, PG_DIAG_SQLSTATE);
+                        PQclear(result);
+                        throw database_error{std::move(error_msg), std::move(sql_state)};
+                    }
+
+                    // Consume any remaining results
+                    PGresult* next_result;
+                    while ((next_result = PQgetResult(native_handle())) != nullptr) {
+                        PQclear(next_result);
+                    }
+
+                    co_return result;
+                }
+
+                // Wait a bit before polling again (1ms)
+                timer.expires_after(std::chrono::milliseconds(1));
+                co_await timer.async_wait(net::use_awaitable);
+            }
+        }
+
         PGconn* conn_{nullptr};
+        net::io_context* ioc_{nullptr};
     };
 
 } // namespace fenrir

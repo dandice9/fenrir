@@ -495,3 +495,114 @@ TEST_CASE("database_pool - Concurrent Queries with Different Durations", "[pool]
         REQUIRE(stats.active_connections == 0);
     }
 }
+
+TEST_CASE("database_pool - Async Operations", "[pool][async]") {
+    boost::asio::io_context ioc;
+    
+    database_pool::pool_config config{
+        .connection_string = TEST_CONNECTION_STRING,
+        .min_connections = 3,
+        .max_connections = 10,
+        .io_context = &ioc  // Enable async for pool
+    };
+    
+    database_pool pool(config);
+    
+    SECTION("Pool connections support async operations") {
+        auto conn = pool.acquire();
+        REQUIRE(conn->get_io_context() == &ioc);
+        
+        auto async_test = [&]() -> boost::asio::awaitable<void> {
+            auto result = co_await conn->async_execute("SELECT 1");
+            REQUIRE(result.row_count() == 1);
+        };
+        
+        boost::asio::co_spawn(ioc, async_test(), boost::asio::detached);
+        ioc.run();
+    }
+    
+    SECTION("Multiple async operations sequentially") {
+        // Create test table
+        {
+            auto setup_conn = pool.acquire();
+            auto result = setup_conn->execute("CREATE TEMP TABLE pool_async_test (id SERIAL, value INT)");
+            PQclear(result);
+        }  // setup_conn returned to pool here
+        
+        auto async_test = [&]() -> boost::asio::awaitable<void> {
+            // Run async operations sequentially
+            for (int i = 0; i < 3; ++i) {
+                auto conn = pool.acquire();
+                auto qr = co_await conn->async_execute_params(
+                    "INSERT INTO pool_async_test (value) VALUES ($1)", 
+                    i * 100
+                );
+                // Check that insert worked
+                REQUIRE(qr.affected_rows() >= 0);
+            }
+            
+            // Verify all inserted
+            auto conn = pool.acquire();
+            auto qr = co_await conn->async_execute("SELECT COUNT(*) FROM pool_async_test");
+            auto count = qr.get<int>(0, 0);
+            REQUIRE(count.value() == 3);
+        };
+        
+        boost::asio::co_spawn(ioc, async_test(), boost::asio::detached);
+        ioc.run();
+    }
+    
+    SECTION("Mix sync and async with pool") {
+        auto conn = pool.acquire();
+        
+        // Create test table with sync
+        auto result = conn->execute("CREATE TEMP TABLE mixed_test (id SERIAL, data TEXT)");
+        PQclear(result);
+        
+        // Insert with sync
+        auto sync_result = conn->execute_params("INSERT INTO mixed_test (data) VALUES ($1)", "sync");
+        PQclear(sync_result);
+        
+        // Insert with async
+        auto async_test = [&]() -> boost::asio::awaitable<void> {
+            auto qr = co_await conn->async_execute_params(
+                "INSERT INTO mixed_test (data) VALUES ($1)", 
+                "async"
+            );
+            REQUIRE(qr.affected_rows() == 1);
+        };
+        
+        boost::asio::co_spawn(ioc, async_test(), boost::asio::detached);
+        ioc.run();
+        
+        // Verify with sync
+        auto verify_result = conn->execute("SELECT COUNT(*) FROM mixed_test");
+        query_result qr(verify_result);
+        auto count = qr.get<int>(0, 0);
+        REQUIRE(count.value() == 2);
+    }
+}
+
+TEST_CASE("database_pool - Pool without async support", "[pool]") {
+    // Pool without io_context - connections don't support async
+    database_pool::pool_config config{
+        .connection_string = TEST_CONNECTION_STRING,
+        .min_connections = 2,
+        .max_connections = 5
+        // No io_context set
+    };
+    
+    database_pool pool(config);
+    
+    SECTION("Connections without io_context are nullptr") {
+        auto conn = pool.acquire();
+        REQUIRE(conn->get_io_context() == nullptr);
+    }
+    
+    SECTION("Can still use sync operations") {
+        auto conn = pool.acquire();
+        auto result = conn->execute("SELECT 1");
+        query_result qr(result);
+        REQUIRE(qr.row_count() == 1);
+    }
+}

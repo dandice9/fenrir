@@ -11,6 +11,7 @@
 #include <thread>
 #include <semaphore>
 #include <functional>
+#include <boost/asio/io_context.hpp>
 
 namespace fenrir {
 
@@ -72,6 +73,7 @@ namespace fenrir {
             std::chrono::seconds idle_timeout{300};
             bool validate_on_acquire = true;
             bool use_connection_string = true;
+            boost::asio::io_context* io_context = nullptr;  // Optional for async support
         };
 
         explicit database_pool(const pool_config& config)
@@ -207,11 +209,20 @@ namespace fenrir {
 
     private:
         std::unique_ptr<database_connection> create_connection() {
+            std::unique_ptr<database_connection> conn;
+            
             if (config_.use_connection_string) {
-                return std::make_unique<database_connection>(config_.connection_string);
+                conn = std::make_unique<database_connection>(config_.connection_string);
             } else {
-                return std::make_unique<database_connection>(config_.connection_params);
+                conn = std::make_unique<database_connection>(config_.connection_params);
             }
+            
+            // Set io_context if provided (enables async operations)
+            if (config_.io_context) {
+                conn->set_io_context(*config_.io_context);
+            }
+            
+            return conn;
         }
 
         void return_connection(std::unique_ptr<database_connection> conn) {

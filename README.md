@@ -10,6 +10,7 @@ A modern, header-only C++20 wrapper for PostgreSQL's libpq library, featuring ex
 - `std::optional` for nullable values
 - `std::format` for string formatting
 - Designated initializers for clean configuration
+- **Coroutines for async operations** ⚡ NEW!
 
 🔒 **RAII Resource Management**
 - Automatic connection cleanup
@@ -22,6 +23,8 @@ A modern, header-only C++20 wrapper for PostgreSQL's libpq library, featuring ex
 - Connection pooling with thread-safety
 - Efficient parameterized queries
 - Move semantics throughout
+- **Unified sync/async API** - Mix freely! ⚡ NEW!
+- **Async operations with Boost.Asio coroutines** ⚡ NEW!
 
 🛡️ **Safety**
 - SQL injection prevention via parameterized queries
@@ -39,6 +42,9 @@ A modern, header-only C++20 wrapper for PostgreSQL's libpq library, featuring ex
 - **libpq** (PostgreSQL client library)
   - Install via Homebrew: `brew install libpq`
   - Or install full PostgreSQL: `brew install postgresql`
+- **Boost.Asio** 1.81+ (for async operations)
+  - Install via Homebrew: `brew install boost`
+  - Or download from https://www.boost.org/
 - **CMake** 3.20 or later (for building tests/examples)
 - **Catch2** v3 (for tests, automatically fetched by CMake)
 
@@ -230,6 +236,193 @@ auto id = qr.get<int>(0, "id");
 if (id) {
     std::cout << "Inserted user with ID: " << *id << std::endl;
 }
+```
+
+## 🚀 Async Operations (NEW!)
+
+Fenrir now supports **unified sync/async operations** on the same connection! Choose between synchronous and asynchronous execution per operation.
+
+### Enable Async Operations
+
+```cpp
+#include "fenrir.hpp"
+#include <boost/asio.hpp>
+
+using namespace fenrir;
+namespace net = boost::asio;
+
+int main() {
+    net::io_context ioc;
+    
+    // Create connection
+    database_connection conn("host=localhost dbname=testdb user=testuser password=testpass");
+    
+    // Enable async by setting io_context
+    conn.set_io_context(ioc);
+    
+    // Now the connection supports BOTH sync and async!
+    
+    // Run async operations
+    net::co_spawn(ioc, example_async(conn), net::detached);
+    ioc.run();
+}
+```
+
+### Async Query Execution
+
+```cpp
+net::awaitable<void> example_async(database_connection& conn) {
+    // Async simple query - non-blocking
+    auto result = co_await conn.async_execute("SELECT * FROM users WHERE active = true");
+    std::cout << "Found " << result.row_count() << " active users" << std::endl;
+    
+    // Async parameterized query - prevents SQL injection
+    auto result2 = co_await conn.async_execute_params(
+        "SELECT * FROM users WHERE email = $1", 
+        "user@example.com"
+    );
+    
+    // Async prepared statements - efficient for repeated queries
+    co_await conn.async_prepare("get_user", "SELECT * FROM users WHERE id = $1");
+    auto result3 = co_await conn.async_execute_prepared("get_user", 42);
+    
+    co_return;
+}
+```
+
+### Mix Sync and Async
+
+You can freely mix synchronous and asynchronous operations on the **same connection**!
+
+```cpp
+database_connection conn("...");
+conn.set_io_context(ioc);
+
+// Use sync for simple operations
+database_query query(conn);
+auto sync_result = query.raw("SELECT * FROM settings");
+
+// Use async for I/O bound operations  
+auto async_func = [&]() -> net::awaitable<void> {
+    auto result = co_await conn.async_execute("SELECT * FROM large_table");
+    // Process asynchronously...
+};
+
+net::co_spawn(ioc, async_func(), net::detached);
+```
+
+### Async with Connection Pool
+
+Enable async for all connections in a pool:
+
+```cpp
+net::io_context ioc;
+
+database_pool::pool_config config{
+    .connection_string = "host=localhost dbname=testdb user=testuser password=testpass",
+    .min_connections = 5,
+    .max_connections = 20,
+    .io_context = &ioc  // 👈 Enable async for entire pool
+};
+
+database_pool pool(config);
+
+// All acquired connections support both sync and async!
+auto async_example = [&]() -> net::awaitable<void> {
+    auto conn = pool.acquire();
+    
+    // Sync operation
+    database_query(*conn).raw("SELECT 1");
+    
+    // Async operation on same connection
+    auto result = co_await conn->async_execute("SELECT 2");
+    
+    co_return;
+};
+
+net::co_spawn(ioc, async_example(), net::detached);
+ioc.run();
+```
+
+### Parallel Async Queries
+
+Execute multiple queries concurrently for maximum performance:
+
+```cpp
+net::awaitable<void> parallel_queries(database_pool& pool) {
+    auto executor = co_await net::this_coro::executor;
+    
+    // Get connections
+    auto conn1 = pool.acquire();
+    auto conn2 = pool.acquire();
+    auto conn3 = pool.acquire();
+    
+    // Launch queries in parallel
+    auto task1 = net::co_spawn(executor, 
+        conn1->async_execute("SELECT COUNT(*) FROM users"),
+        net::use_awaitable
+    );
+    
+    auto task2 = net::co_spawn(executor,
+        conn2->async_execute("SELECT COUNT(*) FROM orders"),
+        net::use_awaitable
+    );
+    
+    auto task3 = net::co_spawn(executor,
+        conn3->async_execute("SELECT COUNT(*) FROM products"),
+        net::use_awaitable
+    );
+    
+    // Wait for all to complete
+    auto [r1, r2, r3] = co_await std::tuple{
+        std::move(task1),
+        std::move(task2),
+        std::move(task3)
+    };
+    
+    std::cout << "Users: " << r1.row_count() << std::endl;
+    std::cout << "Orders: " << r2.row_count() << std::endl;
+    std::cout << "Products: " << r3.row_count() << std::endl;
+}
+```
+
+### When to Use Sync vs Async
+
+**Use Synchronous When:**
+- Simple CRUD operations
+- Sequential workflow (one query depends on previous)
+- Rapid development / prototyping
+- Low concurrency requirements
+- CPU-bound operations
+
+**Use Asynchronous When:**
+- High concurrency (many simultaneous queries)
+- Long-running queries
+- I/O-bound operations
+- Building web servers with async request handling
+- Need to maximize throughput
+- Parallel queries for better performance
+
+**Mix Both When:**
+- Some operations are quick (sync), others are slow (async)
+- Gradual migration from sync to async
+- Different parts of your app have different requirements
+
+### Performance Comparison
+
+```cpp
+// Sequential sync - SLOW (waits for each query)
+auto r1 = conn.execute("SELECT * FROM users");      // Wait...
+auto r2 = conn.execute("SELECT * FROM orders");     // Wait...
+auto r3 = conn.execute("SELECT * FROM products");   // Wait...
+// Total time: T1 + T2 + T3
+
+// Parallel async - FAST (all at once)
+auto task1 = conn1->async_execute("SELECT * FROM users");
+auto task2 = conn2->async_execute("SELECT * FROM orders");  
+auto task3 = conn3->async_execute("SELECT * FROM products");
+auto [r1, r2, r3] = co_await std::tuple{task1, task2, task3};
+// Total time: max(T1, T2, T3) ⚡ Much faster!
 ```
 
 ### Query Builder Pattern
@@ -549,7 +742,7 @@ database_connection::connection_params params{
 database_connection conn(params);
 ```
 
-**Methods:**
+**Synchronous Methods:**
 - `is_connected()` - Check connection status
 - `execute(query)` - Execute simple query, returns `PGresult*`
 - `execute_params(query, args...)` - Execute parameterized query, returns `PGresult*`
@@ -559,7 +752,15 @@ database_connection conn(params);
 - `reset()` - Reset connection
 - `close()` - Close connection
 
-**Note:** `execute()` and `execute_params()` return raw `PGresult*` pointers. Wrap them in `query_result` for automatic memory management, or manually call `PQclear()`.
+**Asynchronous Methods:** (require `set_io_context()` first)
+- `set_io_context(ioc)` - Enable async operations on this connection
+- `get_io_context()` - Get the io_context pointer (nullptr if not set)
+- `async_execute(query)` - Async query execution, returns `awaitable<query_result>`
+- `async_execute_params(query, args...)` - Async parameterized query, returns `awaitable<query_result>`
+- `async_prepare(name, query)` - Async prepare statement, returns `awaitable<void>`
+- `async_execute_prepared(name, args...)` - Async execute prepared statement, returns `awaitable<query_result>`
+
+**Note:** `execute()` and `execute_params()` return raw `PGresult*` pointers. Wrap them in `query_result` for automatic memory management, or manually call `PQclear()`. Async methods automatically return `query_result` with RAII.
 
 ### database_query
 
@@ -649,11 +850,22 @@ Thread-safe connection pool with automatic connection management.
 
 **Configuration:**
 ```cpp
+// Without async support
 database_pool::pool_config config{
     .connection_string = "host=localhost dbname=testdb user=testuser password=testpass",
     .min_connections = 5,
     .max_connections = 20,
     .acquire_timeout = std::chrono::seconds(10)
+};
+
+// With async support (NEW!)
+boost::asio::io_context ioc;
+database_pool::pool_config config_async{
+    .connection_string = "host=localhost dbname=testdb user=testuser password=testpass",
+    .min_connections = 5,
+    .max_connections = 20,
+    .acquire_timeout = std::chrono::seconds(10),
+    .io_context = &ioc  // 👈 Enable async for all pool connections
 };
 ```
 
@@ -710,7 +922,7 @@ Built on top of PostgreSQL's excellent libpq library. Designed to leverage moder
 
 ## Quick Reference
 
-### Common Operations
+### Common Operations - Synchronous
 
 ```cpp
 // Connect
@@ -736,6 +948,47 @@ auto result = query.select("*").from("users").where("age > 18").execute();
 database_pool pool(config);
 auto conn = pool.acquire();
 conn->execute("SELECT 1");
+```
+
+### Common Operations - Asynchronous (NEW!)
+
+```cpp
+#include <boost/asio.hpp>
+namespace net = boost::asio;
+
+// Enable async on connection
+net::io_context ioc;
+database_connection conn("host=localhost dbname=testdb user=testuser password=testpass");
+conn.set_io_context(ioc);
+
+// Async query
+auto async_func = [&]() -> net::awaitable<void> {
+    auto result = co_await conn.async_execute("SELECT * FROM users");
+    std::cout << "Found " << result.row_count() << " users" << std::endl;
+    
+    // Async parameterized query
+    auto result2 = co_await conn.async_execute_params(
+        "SELECT * FROM users WHERE age > $1", 
+        18
+    );
+    
+    // Async prepared statement
+    co_await conn.async_prepare("get_user", "SELECT * FROM users WHERE id = $1");
+    auto result3 = co_await conn.async_execute_prepared("get_user", 42);
+};
+
+net::co_spawn(ioc, async_func(), net::detached);
+ioc.run();
+
+// Pool with async support
+database_pool::pool_config pool_config{
+    .connection_string = "...",
+    .io_context = &ioc  // All connections support async
+};
+database_pool pool(pool_config);
+
+auto conn2 = pool.acquire();
+co_await conn2->async_execute("SELECT 1");  // Works!
 ```
 
 ### Test Database Credentials
