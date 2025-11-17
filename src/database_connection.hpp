@@ -276,15 +276,24 @@ namespace fenrir {
         // Helper to convert arguments to strings
         template<typename T>
         static std::string to_string(T&& value) {
-            if constexpr (std::is_same_v<std::decay_t<T>, std::string>) {
+            using DecayedT = std::decay_t<T>;
+            
+            // Handle std::optional types
+            if constexpr (requires { typename DecayedT::value_type; DecayedT{}.has_value(); }) {
+                // This is std::optional
+                if (!value.has_value()) {
+                    return "NULL";
+                }
+                return to_string(*value);
+            } else if constexpr (std::is_same_v<DecayedT, std::string>) {
                 return std::forward<T>(value);
-            } else if constexpr (std::is_same_v<std::decay_t<T>, const char*>) {
+            } else if constexpr (std::is_same_v<DecayedT, const char*>) {
                 return std::string(value);
-            } else if constexpr (std::is_same_v<std::decay_t<T>, std::string_view>) {
+            } else if constexpr (std::is_same_v<DecayedT, std::string_view>) {
                 return std::string(value);
-            } else if constexpr (std::is_arithmetic_v<std::decay_t<T>>) {
+            } else if constexpr (std::is_arithmetic_v<DecayedT>) {
                 return std::to_string(value);
-            } else if constexpr (std::is_same_v<std::decay_t<T>, bool>) {
+            } else if constexpr (std::is_same_v<DecayedT, bool>) {
                 return value ? "true" : "false";
             } else {
                 // Try to use std::format for other types
