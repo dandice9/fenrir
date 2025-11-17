@@ -205,6 +205,17 @@ namespace fenrir {
             return *this;
         }
 
+        database_query& where(std::string_view condition, auto&&... params) {
+            if (query_.find(" WHERE ") == std::string::npos) {
+                query_ += " WHERE ";
+            } else {
+                query_ += " AND ";
+            }
+            query_ += condition;
+            // Parameters can be bound during execution
+            return *this;
+        }
+
         database_query& order_by(std::string_view column, bool ascending = true) {
             query_ += std::format(" ORDER BY {} {}", column, ascending ? "ASC" : "DESC");
             return *this;
@@ -231,6 +242,14 @@ namespace fenrir {
         [[nodiscard]] query_result execute(Args&&... args) {
             auto result = conn_.execute_params(query_, std::forward<Args>(args)...);
             return query_result(result);
+        }
+
+        // Execute with parameters asynchronously
+        template<typename... Args>
+        [[nodiscard]] net::awaitable<query_result> execute_async(Args&&... args) {
+            auto result = co_await conn_.async_execute_params(
+                query_, std::forward<Args>(args)...);
+            co_return result;
         }
 
         // Direct SQL execution
