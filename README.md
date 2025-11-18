@@ -10,7 +10,8 @@ A modern, header-only C++20 wrapper for PostgreSQL's libpq library, featuring ex
 - `std::optional` for nullable values
 - `std::format` for string formatting
 - Designated initializers for clean configuration
-- **Coroutines for async operations** ⚡ NEW!
+- **Coroutines for async operations** ⚡
+- **Unified file structure** - Single header for sync/async ⚡ NEW!
 
 🔒 **RAII Resource Management**
 - Automatic connection cleanup
@@ -23,8 +24,9 @@ A modern, header-only C++20 wrapper for PostgreSQL's libpq library, featuring ex
 - Connection pooling with thread-safety
 - Efficient parameterized queries
 - Move semantics throughout
-- **Unified sync/async API** - Mix freely! ⚡ NEW!
-- **Async operations with Boost.Asio coroutines** ⚡ NEW!
+- **Unified sync/async API** - Mix freely on the same connection! ⚡
+- **Async operations with Boost.Asio coroutines** - Non-blocking I/O ⚡
+- **Async polling mechanism** - Efficient result waiting with steady_timer ⚡
 
 🛡️ **Safety**
 - SQL injection prevention via parameterized queries
@@ -238,14 +240,28 @@ if (id) {
 }
 ```
 
-## 🚀 Async Operations (NEW!)
+## 🚀 Async Operations
 
-Fenrir now supports **unified sync/async operations** on the same connection! Choose between synchronous and asynchronous execution per operation.
+Fenrir supports **unified sync/async operations** on the same connection! Choose between synchronous and asynchronous execution per operation.
+
+### Architecture
+
+**Unified Header Design:**
+- All sync and async code in `database_connection.hpp` (no separate `_async.hpp` file)
+- Async method implementations are inline at the end of the header
+- Clean separation: declarations in class, implementations after `query_result` definition
+- Zero circular dependencies through proper include ordering
+
+**Async Implementation:**
+- Uses `PQsendQuery` for non-blocking query submission
+- Polling-based result waiting with `steady_timer` (1ms intervals)
+- Automatic result validation and error handling
+- Returns `query_result` with RAII memory management
 
 ### Enable Async Operations
 
 ```cpp
-#include "fenrir.hpp"
+#include "fenrir.hpp"  // Single header includes everything!
 #include <boost/asio.hpp>
 
 using namespace fenrir;
@@ -254,13 +270,17 @@ namespace net = boost::asio;
 int main() {
     net::io_context ioc;
     
-    // Create connection
+    // Create connection (sync methods work immediately)
     database_connection conn("host=localhost dbname=testdb user=testuser password=testpass");
+    
+    // Use sync methods right away
+    auto result = conn.execute("SELECT 1");
+    PQclear(result);
     
     // Enable async by setting io_context
     conn.set_io_context(ioc);
     
-    // Now the connection supports BOTH sync and async!
+    // Now the SAME connection supports BOTH sync and async!
     
     // Run async operations
     net::co_spawn(ioc, example_async(conn), net::detached);
@@ -402,11 +422,13 @@ net::awaitable<void> parallel_queries(database_pool& pool) {
 - Building web servers with async request handling
 - Need to maximize throughput
 - Parallel queries for better performance
+- Working with async frameworks (like Wolf web server with coroutines)
 
 **Mix Both When:**
 - Some operations are quick (sync), others are slow (async)
 - Gradual migration from sync to async
 - Different parts of your app have different requirements
+- Prototyping features (start with sync, optimize with async later)
 
 ### Performance Comparison
 
@@ -724,41 +746,56 @@ The example connects to the database and shows:
 
 ### database_connection
 
-Main connection class with RAII management.
+Main connection class with RAII management. Defined in `database_connection.hpp`.
 
 **Construction:**
 ```cpp
 // Connection string
 database_connection conn("host=localhost dbname=testdb user=testuser password=testpass");
 
-// Structured parameters
+// Structured parameters (C++20 designated initializers)
 database_connection::connection_params params{
     .host = "localhost",
     .port = "5432",
     .database = "testdb",
     .user = "testuser",
-    .password = "testpass"
+    .password = "testpass",
+    .connect_timeout = std::chrono::seconds(30),
+    .application_name = "my_app",
+    .client_encoding = "UTF8"
 };
 database_connection conn(params);
 ```
 
 **Synchronous Methods:**
 - `is_connected()` - Check connection status
+- `status()` - Get connection status enum
 - `execute(query)` - Execute simple query, returns `PGresult*`
 - `execute_params(query, args...)` - Execute parameterized query, returns `PGresult*`
+  - Supports `std::optional` - automatically converts to NULL
+  - Template supports any type convertible to string
 - `database_name()`, `user_name()`, `host()`, `port()` - Connection info
-- `server_version()` - Get PostgreSQL server version
 - `ping()` - Test connection liveness
 - `reset()` - Reset connection
 - `close()` - Close connection
+- `native_handle()` - Get raw PGconn* pointer
 
 **Asynchronous Methods:** (require `set_io_context()` first)
 - `set_io_context(ioc)` - Enable async operations on this connection
 - `get_io_context()` - Get the io_context pointer (nullptr if not set)
 - `async_execute(query)` - Async query execution, returns `awaitable<query_result>`
 - `async_execute_params(query, args...)` - Async parameterized query, returns `awaitable<query_result>`
+  - Automatically handles `std::optional` parameters
+  - Uses same type conversion as sync version
 - `async_prepare(name, query)` - Async prepare statement, returns `awaitable<void>`
 - `async_execute_prepared(name, args...)` - Async execute prepared statement, returns `awaitable<query_result>`
+
+**Implementation Details:**
+- Async methods use `PQsendQuery` for non-blocking query submission
+- Internal `wait_for_result()` polls with `steady_timer` (1ms intervals)
+- Automatic result validation (PGRES_COMMAND_OK or PGRES_TUPLES_OK)
+- Thread-safe with proper io_context executor usage
+- All async methods are `inline` at the end of `database_connection.hpp`
 
 **Note:** `execute()` and `execute_params()` return raw `PGresult*` pointers. Wrap them in `query_result` for automatic memory management, or manually call `PQclear()`. Async methods automatically return `query_result` with RAII.
 
@@ -919,6 +956,20 @@ Contributions are welcome! Please ensure:
 ## Acknowledgments
 
 Built on top of PostgreSQL's excellent libpq library. Designed to leverage modern C++20 features for type safety and ergonomic APIs.
+
+## 🎉 Recent Improvements
+
+### v2.1 - Unified Architecture (Latest)
+- ✅ **Single Header**: Merged `database_connection.hpp` and `database_connection_async.hpp`
+- ✅ **Zero Circular Dependencies**: Clean include ordering with forward declarations
+- ✅ **Better Organization**: Class declarations + implementations in logical sections
+- ✅ **Easier to Use**: Just `#include "fenrir.hpp"` - everything works!
+
+### v2.0 - Async Support
+- ✅ **Coroutine Support**: C++20 `co_await` for async operations
+- ✅ **Unified API**: Mix sync/async on the same connection
+- ✅ **Polling-Based**: Efficient result waiting with steady_timer
+- ✅ **Type-Safe**: `std::optional` support in parameterized queries
 
 ## Quick Reference
 
