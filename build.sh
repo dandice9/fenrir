@@ -91,6 +91,7 @@ echo "  - connection_test"
 echo "  - query_test"
 echo "  - transaction_test"
 echo "  - pool_test"
+echo "  - stored_procedure_test"
 echo "  - usage_example"
 echo ""
 

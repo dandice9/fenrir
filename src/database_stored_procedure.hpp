@@ -5,8 +5,11 @@
 #include <vector>
 #include <string>
 #include <format>
+#include <boost/asio/awaitable.hpp>
 
 namespace fenrir {
+
+    namespace net = boost::asio;
 
     // Stored procedure parameter direction
     enum class param_direction {
@@ -60,7 +63,7 @@ namespace fenrir {
             return *this;
         }
 
-        // Execute stored procedure
+        // Execute stored procedure (synchronous)
         [[nodiscard]] query_result execute() {
             // Build parameter list for PostgreSQL function call
             std::vector<std::string> param_placeholders;
@@ -89,7 +92,34 @@ namespace fenrir {
             }
         }
 
-        // Execute as a function returning single value
+        // Execute stored procedure (asynchronous)
+        [[nodiscard]] net::awaitable<query_result> async_execute() {
+            // Build parameter list for PostgreSQL function call
+            std::vector<std::string> param_placeholders;
+            std::vector<std::string> param_values;
+            
+            for (size_t i = 0; i < params_.size(); ++i) {
+                if (params_[i].direction != param_direction::out) {
+                    param_placeholders.push_back(std::format("${}", i + 1));
+                    param_values.push_back(params_[i].value);
+                }
+            }
+
+            std::string sql;
+            if (param_placeholders.empty()) {
+                sql = std::format("SELECT * FROM {}()", proc_name_);
+                co_return co_await conn_.async_execute(sql);
+            } else {
+                sql = std::format("SELECT * FROM {}({})", 
+                                 proc_name_,
+                                 join_strings(param_placeholders, ", "));
+                
+                // Execute with parameters asynchronously
+                co_return co_await async_execute_with_params(sql, param_values);
+            }
+        }
+
+        // Execute as a function returning single value (synchronous)
         template<typename T>
         [[nodiscard]] std::optional<T> execute_scalar() {
             auto result = execute();
@@ -99,6 +129,18 @@ namespace fenrir {
             }
 
             return result.get<T>(0, 0);
+        }
+
+        // Execute as a function returning single value (asynchronous)
+        template<typename T>
+        [[nodiscard]] net::awaitable<std::optional<T>> async_execute_scalar() {
+            auto result = co_await async_execute();
+
+            if (result.row_count() == 0 || result.column_count() == 0) {
+                co_return std::nullopt;
+            }
+
+            co_return result.template get<T>(0, 0);
         }
 
         // Clear all parameters
@@ -176,6 +218,79 @@ namespace fenrir {
             }
 
             return result;
+        }
+
+        net::awaitable<query_result> async_execute_with_params(
+            std::string_view sql, const std::vector<std::string>& values) {
+            
+            if (!conn_.is_connected()) {
+                throw database_error{"Connection is not valid"};
+            }
+            if (!conn_.get_io_context()) {
+                throw database_error{"io_context not set. Call set_io_context() first."};
+            }
+
+            std::vector<const char*> param_ptrs;
+            for (const auto& val : values) {
+                param_ptrs.push_back(val.c_str());
+            }
+
+            // Send parameterized query asynchronously
+            if (!PQsendQueryParams(
+                conn_.native_handle(),
+                sql.data(),
+                static_cast<int>(param_ptrs.size()),
+                nullptr,
+                param_ptrs.data(),
+                nullptr,
+                nullptr,
+                0)) {
+                throw database_error{
+                    std::format("Stored procedure execution failed: {}", conn_.last_error())
+                };
+            }
+
+            // Wait for result asynchronously
+            auto executor = co_await net::this_coro::executor;
+            net::steady_timer timer(executor);
+            
+            while (true) {
+                // Check if result is ready (non-blocking)
+                if (PQconsumeInput(conn_.native_handle()) == 0) {
+                    throw database_error{
+                        std::format("Failed to consume input: {}", conn_.last_error())
+                    };
+                }
+
+                if (PQisBusy(conn_.native_handle()) == 0) {
+                    // Result is ready
+                    PGresult* result = PQgetResult(conn_.native_handle());
+                    
+                    if (!result) {
+                        throw database_error{"Query returned no result"};
+                    }
+
+                    ExecStatusType status = PQresultStatus(result);
+                    if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+                        std::string error_msg = PQresultErrorMessage(result);
+                        std::string sql_state = PQresultErrorField(result, PG_DIAG_SQLSTATE);
+                        PQclear(result);
+                        throw database_error{std::move(error_msg), std::move(sql_state)};
+                    }
+
+                    // Consume remaining results
+                    PGresult* extra = nullptr;
+                    while ((extra = PQgetResult(conn_.native_handle())) != nullptr) {
+                        PQclear(extra);
+                    }
+
+                    co_return query_result(result);
+                }
+
+                // Not ready yet, wait a bit
+                timer.expires_after(std::chrono::milliseconds(1));
+                co_await timer.async_wait(net::use_awaitable);
+            }
         }
 
         database_connection& conn_;

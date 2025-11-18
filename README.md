@@ -608,7 +608,13 @@ std::cout << "Active: " << stats.active_connections
 
 ### Stored Procedures
 
+Fenrir provides a convenient wrapper for calling PostgreSQL stored procedures and functions, with **both synchronous and asynchronous support**.
+
+#### Synchronous Stored Procedures
+
 ```cpp
+#include "fenrir.hpp"
+
 // Create a PostgreSQL function
 auto create_result = conn.execute(
     "CREATE OR REPLACE FUNCTION add_numbers(a INTEGER, b INTEGER) "
@@ -618,14 +624,136 @@ auto create_result = conn.execute(
 );
 PQclear(create_result);
 
-// Call the function using execute_params
+// Method 1: Call directly using execute_params
 auto result = conn.execute_params("SELECT add_numbers($1, $2)", "10", "20");
 query_result qr(result);
 auto sum = qr.get<int>(0, 0);
 if (sum) {
     std::cout << "Result: " << *sum << std::endl;  // 30
 }
+
+// Method 2: Use database_stored_procedure wrapper
+database_stored_procedure proc(conn, "add_numbers");
+proc.add_param("a", 10)
+    .add_param("b", 20);
+
+auto result2 = proc.execute();
+auto sum2 = result2.get<int>(0, 0);  // 30
+
+// Method 3: Execute scalar function (returns single value)
+database_stored_procedure get_count(conn, "get_user_count");
+auto count = get_count.execute_scalar<int>();
+if (count) {
+    std::cout << "Total users: " << *count << std::endl;
+}
 ```
+
+#### Asynchronous Stored Procedures ⚡ NEW!
+
+Perfect for high-performance web servers and concurrent applications:
+
+```cpp
+#include "fenrir.hpp"
+#include <boost/asio.hpp>
+
+namespace net = boost::asio;
+
+net::awaitable<void> create_user_async(database_connection& conn) {
+    // Create stored procedure call
+    database_stored_procedure proc(conn, "create_user");
+    
+    proc.add_param("username", "alice")
+        .add_param("email", "alice@example.com")
+        .add_param("age", 28);
+    
+    // Execute asynchronously (non-blocking!)
+    auto result = co_await proc.async_execute();
+    
+    std::cout << "User created! ID: " 
+              << result.get<int>(0, "id").value() << "\n";
+}
+
+net::awaitable<void> get_statistics_async(database_connection& conn) {
+    // Async scalar function (returns single value)
+    database_stored_procedure count_proc(conn, "get_total_users");
+    auto user_count = co_await count_proc.async_execute_scalar<int>();
+    
+    if (user_count) {
+        std::cout << "Total users: " << *user_count << "\n";
+    }
+}
+
+int main() {
+    net::io_context ioc;
+    database_connection conn("host=localhost dbname=testdb user=testuser password=testpass");
+    conn.set_io_context(ioc);
+    
+    net::co_spawn(ioc, create_user_async(conn), net::detached);
+    net::co_spawn(ioc, get_statistics_async(conn), net::detached);
+    
+    ioc.run();
+}
+```
+
+#### Integration with Wolf Web Server
+
+Async stored procedures pair perfectly with Wolf's async handlers:
+
+```cpp
+#include "fenrir.hpp"
+#include "wolf.hpp"
+
+int main() {
+    // Setup database pool with async support
+    net::io_context ioc;
+    fenrir::database_pool::pool_config config{
+        .connection_string = "host=localhost dbname=myapp",
+        .min_connections = 5,
+        .max_connections = 20,
+        .io_context = &ioc
+    };
+    fenrir::database_pool pool(config);
+    
+    // Create web server
+    wolf::web_server server(8080);
+    
+    // Async endpoint with async stored procedure
+    server->post("/api/users",
+        [&pool](const wolf::http_request& req)
+        -> net::awaitable<wolf::http_response> {
+        
+        try {
+            auto body = req.get_json_body().as_object();
+            
+            // Get connection from pool (async)
+            auto conn = co_await pool.async_acquire();
+            
+            // Call stored procedure (async)
+            fenrir::database_stored_procedure proc(*conn, "create_user");
+            proc.add_param("username", body["username"].as_string())
+                .add_param("email", body["email"].as_string())
+                .add_param("age", body["age"].as_int64());
+            
+            auto result = co_await proc.async_execute();
+            auto new_id = result.get<int>(0, "id").value();
+            
+            co_return wolf::http_response(201).json({
+                {"success", true},
+                {"id", new_id}
+            });
+            
+        } catch (const fenrir::database_error& e) {
+            co_return wolf::http_response(500).json({
+                {"error", e.what()}
+            });
+        }
+    });
+    
+    server.start();
+}
+```
+
+**See [ASYNC_STORED_PROCEDURES.md](docs/ASYNC_STORED_PROCEDURES.md) for comprehensive documentation.**
 
 ## Error Handling
 
@@ -765,6 +893,7 @@ ctest --verbose
 - `tests/query_test.cpp` - Query builder, result handling, type conversions
 - `tests/transaction_test.cpp` - Transactions, savepoints, isolation levels
 - `tests/pool_test.cpp` - Connection pooling, thread safety, statistics
+- `tests/stored_procedure_test.cpp` - Async/sync stored procedure execution ⚡ NEW!
 
 ## Examples
 
@@ -921,6 +1050,34 @@ savepoint sp(conn, "savepoint_name");
 - `rollback()` - Rollback to this savepoint
 - Destructor automatically releases savepoint if not rolled back
 
+### database_stored_procedure
+
+Convenient wrapper for calling PostgreSQL stored procedures and functions with **sync/async support**.
+
+**Methods:**
+- `add_param(name, value)` - Add input parameter
+- `add_out_param(name)` - Add output parameter
+- `add_inout_param(name, value)` - Add input/output parameter
+- `execute()` - Execute synchronously, returns `query_result`
+- `async_execute()` - Execute asynchronously, returns `awaitable<query_result>` ⚡ NEW!
+- `execute_scalar<T>()` - Execute and return single value as `optional<T>`
+- `async_execute_scalar<T>()` - Async scalar execution, returns `awaitable<optional<T>>` ⚡ NEW!
+- `clear_params()` - Clear all parameters
+- `name()` - Get procedure name
+
+**Example:**
+```cpp
+// Synchronous
+database_stored_procedure proc(conn, "create_user");
+proc.add_param("username", "alice")
+    .add_param("email", "alice@example.com");
+auto result = proc.execute();
+
+// Asynchronous ⚡
+auto async_result = co_await proc.async_execute();
+auto count = co_await proc.async_execute_scalar<int>();
+```
+
 ### database_pool
 
 Thread-safe connection pool with automatic connection management.
@@ -999,7 +1156,15 @@ Built on top of PostgreSQL's excellent libpq library. Designed to leverage moder
 
 ## 🎉 Recent Improvements
 
-### v2.2 - Type-Safe Query Builder (Latest) ⚡ NEW!
+### v2.3 - Async Stored Procedures (Latest) ⚡ NEW!
+- ✅ **Async Execution**: `async_execute()` for non-blocking stored procedure calls
+- ✅ **Async Scalar**: `async_execute_scalar<T>()` for single-value returns
+- ✅ **Perfect Match**: Works seamlessly with Wolf web server async handlers
+- ✅ **Same API**: Familiar interface mirroring synchronous methods
+- ✅ **High Performance**: Non-blocking I/O for concurrent request handling
+- ✅ **Backward Compatible**: All synchronous methods unchanged
+
+### v2.2 - Type-Safe Query Builder ⚡
 - ✅ **Compile-Time Validation**: C++20 concepts enforce correct query construction
 - ✅ **State Tracking**: Template-based state machine validates method order
 - ✅ **Zero Overhead**: All checks compile away (same runtime performance)

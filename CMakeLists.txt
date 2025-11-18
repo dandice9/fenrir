@@ -18,6 +18,10 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     add_compile_options(-std=c++20)
 endif()
 
+# Include directories
+find_package(Boost REQUIRED)
+include_directories(${Boost_INCLUDE_DIRS})
+
 # Find libpq (PostgreSQL client library)
 # Try Homebrew paths first on macOS
 if(APPLE)
@@ -112,6 +116,11 @@ if(BUILD_TESTS)
     target_link_libraries(pool_test PRIVATE fenrir Catch2::Catch2WithMain)
     add_test(NAME PoolTest COMMAND pool_test)
     
+    # Stored procedure tests
+    add_executable(stored_procedure_test tests/stored_procedure_test.cpp)
+    target_link_libraries(stored_procedure_test PRIVATE fenrir Catch2::Catch2WithMain)
+    add_test(NAME StoredProcedureTest COMMAND stored_procedure_test)
+    
     # Catch2 test discovery
     if(Catch2_FOUND)
         include(Catch)
@@ -119,6 +128,7 @@ if(BUILD_TESTS)
         catch_discover_tests(query_test)
         catch_discover_tests(transaction_test)
         catch_discover_tests(pool_test)
+        catch_discover_tests(stored_procedure_test)
     endif()
 endif()
 
