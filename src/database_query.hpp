@@ -8,8 +8,86 @@
 #include <concepts>
 #include <ranges>
 #include <span>
+#include <type_traits>
 
 namespace fenrir {
+
+    // ============================================================================
+    // Query Builder State Tracking (Compile-Time)
+    // ============================================================================
+    
+    // Query type tags for compile-time validation
+    struct select_query_tag {};
+    struct insert_query_tag {};
+    struct update_query_tag {};
+    struct delete_query_tag {};
+    struct no_query_tag {};
+    
+    // State flags for query building
+    template<typename QueryType = no_query_tag,
+             bool HasFrom = false,
+             bool HasWhere = false,
+             bool HasSet = false,
+             bool HasValues = false>
+    struct query_state {
+        using query_type = QueryType;
+        static constexpr bool has_from = HasFrom;
+        static constexpr bool has_where = HasWhere;
+        static constexpr bool has_set = HasSet;
+        static constexpr bool has_values = HasValues;
+    };
+    
+    // Default initial state
+    using initial_query_state = query_state<>;
+    
+    // Concepts for compile-time validation
+    template<typename State>
+    concept SelectQuery = std::same_as<typename State::query_type, select_query_tag>;
+    
+    template<typename State>
+    concept InsertQuery = std::same_as<typename State::query_type, insert_query_tag>;
+    
+    template<typename State>
+    concept UpdateQuery = std::same_as<typename State::query_type, update_query_tag>;
+    
+    template<typename State>
+    concept DeleteQuery = std::same_as<typename State::query_type, delete_query_tag>;
+    
+    template<typename State>
+    concept HasFrom = State::has_from;
+    
+    template<typename State>
+    concept HasWhere = State::has_where;
+    
+    template<typename State>
+    concept HasSet = State::has_set;
+    
+    template<typename State>
+    concept HasValues = State::has_values;
+    
+    template<typename State>
+    concept NoQueryStarted = std::same_as<typename State::query_type, no_query_tag>;
+    
+    template<typename State>
+    concept QueryStarted = !NoQueryStarted<State>;
+    
+    template<typename State>
+    concept CanExecute = (SelectQuery<State> && HasFrom<State>) ||
+                         (InsertQuery<State> && HasValues<State>) ||
+                         (UpdateQuery<State> && HasSet<State>) ||
+                         (DeleteQuery<State> && HasFrom<State>);
+    
+    template<typename State>
+    concept CanAddFrom = (SelectQuery<State> || DeleteQuery<State>) && !HasFrom<State>;
+    
+    template<typename State>
+    concept CanAddWhere = QueryStarted<State> && HasFrom<State> && !HasWhere<State>;
+    
+    template<typename State>
+    concept CanAddSet = UpdateQuery<State> && !HasSet<State>;
+    
+    template<typename State>
+    concept CanAddValues = InsertQuery<State> && !HasValues<State>;
 
     // RAII wrapper for PGresult
     class query_result {
@@ -179,7 +257,274 @@ namespace fenrir {
         std::unique_ptr<PGresult, decltype(&PQclear)> result_;
     };
 
-    // Query builder with method chaining
+    // ============================================================================
+    // Type-Safe Query Builder with Compile-Time Validation
+    // ============================================================================
+    
+    template<typename State = initial_query_state>
+    class typed_query_builder {
+    public:
+        explicit typed_query_builder(database_connection& conn) : conn_(conn) {}
+        
+        // Copy state for chaining
+        typed_query_builder(database_connection& conn, std::string query)
+            : conn_(conn), query_(std::move(query)) {}
+        
+        // ========================================================================
+        // Query Starters (only allowed when no query started)
+        // ========================================================================
+        
+        // Start SELECT query
+        [[nodiscard]] auto select(std::string_view columns) requires NoQueryStarted<State> {
+            using new_state = query_state<select_query_tag, false, false, false, false>;
+            return typed_query_builder<new_state>(
+                conn_, 
+                std::format("SELECT {}", columns)
+            );
+        }
+        
+        // Start INSERT query
+        [[nodiscard]] auto insert_into(std::string_view table, std::string_view columns) 
+            requires NoQueryStarted<State> {
+            using new_state = query_state<insert_query_tag, false, false, false, false>;
+            return typed_query_builder<new_state>(
+                conn_,
+                std::format("INSERT INTO {} ({})", table, columns)
+            );
+        }
+        
+        // Start UPDATE query
+        [[nodiscard]] auto update(std::string_view table) requires NoQueryStarted<State> {
+            using new_state = query_state<update_query_tag, false, false, false, false>;
+            return typed_query_builder<new_state>(
+                conn_,
+                std::format("UPDATE {}", table)
+            );
+        }
+        
+        // Start DELETE query
+        [[nodiscard]] auto delete_from(std::string_view table) requires NoQueryStarted<State> {
+            using new_state = query_state<delete_query_tag, true, false, false, false>;
+            return typed_query_builder<new_state>(
+                conn_,
+                std::format("DELETE FROM {}", table)
+            );
+        }
+        
+        // ========================================================================
+        // FROM clause (SELECT and DELETE only, once per query)
+        // ========================================================================
+        
+        [[nodiscard]] auto from(std::string_view table) requires CanAddFrom<State> {
+            using new_state = query_state<typename State::query_type, true, 
+                                         State::has_where, State::has_set, State::has_values>;
+            return typed_query_builder<new_state>(
+                conn_,
+                query_ + std::format(" FROM {}", table)
+            );
+        }
+        
+        // ========================================================================
+        // SET clause (UPDATE only, required before WHERE)
+        // ========================================================================
+        
+        [[nodiscard]] auto set(std::string_view assignments) requires CanAddSet<State> {
+            using new_state = query_state<typename State::query_type, true,
+                                         State::has_where, true, State::has_values>;
+            return typed_query_builder<new_state>(
+                conn_,
+                query_ + std::format(" SET {}", assignments)
+            );
+        }
+        
+        // ========================================================================
+        // VALUES clause (INSERT only, required)
+        // ========================================================================
+        
+        [[nodiscard]] auto values(std::string_view value_list) requires CanAddValues<State> {
+            using new_state = query_state<typename State::query_type, true,
+                                         State::has_where, State::has_set, true>;
+            return typed_query_builder<new_state>(
+                conn_,
+                query_ + std::format(" VALUES ({})", value_list)
+            );
+        }
+
+        // ========================================================================
+        // WHERE clause (can be added multiple times as AND conditions)
+        // ========================================================================
+        
+        [[nodiscard]] auto where(std::string_view condition) 
+            requires (QueryStarted<State> && HasFrom<State>) {
+            using new_state = query_state<typename State::query_type, State::has_from,
+                                         true, State::has_set, State::has_values>;
+            std::string new_query = query_;
+            if (!State::has_where) {
+                new_query += " WHERE ";
+            } else {
+                new_query += " AND ";
+            }
+            new_query += condition;
+            return typed_query_builder<new_state>(conn_, std::move(new_query));
+        }
+        
+        // ========================================================================
+        // ORDER BY (SELECT only, after FROM)
+        // ========================================================================
+        
+        [[nodiscard]] auto order_by(std::string_view column, bool ascending = true)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" ORDER BY {} {}", column, ascending ? "ASC" : "DESC")
+            );
+        }
+        
+        // ========================================================================
+        // LIMIT and OFFSET (SELECT only)
+        // ========================================================================
+        
+        [[nodiscard]] auto limit(int count) requires (SelectQuery<State> && HasFrom<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" LIMIT {}", count)
+            );
+        }
+        
+        [[nodiscard]] auto offset(int count) requires (SelectQuery<State> && HasFrom<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" OFFSET {}", count)
+            );
+        }
+        
+        // ========================================================================
+        // JOIN (SELECT only, after FROM)
+        // ========================================================================
+        
+        [[nodiscard]] auto join(std::string_view table, std::string_view condition, 
+                               std::string_view type = "INNER")
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" {} JOIN {} ON {}", type, table, condition)
+            );
+        }
+        
+        [[nodiscard]] auto inner_join(std::string_view table, std::string_view condition)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return join(table, condition, "INNER");
+        }
+        
+        [[nodiscard]] auto left_join(std::string_view table, std::string_view condition)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return join(table, condition, "LEFT");
+        }
+        
+        [[nodiscard]] auto right_join(std::string_view table, std::string_view condition)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return join(table, condition, "RIGHT");
+        }
+        
+        [[nodiscard]] auto full_join(std::string_view table, std::string_view condition)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return join(table, condition, "FULL");
+        }
+        
+        // ========================================================================
+        // GROUP BY and HAVING (SELECT only)
+        // ========================================================================
+        
+        [[nodiscard]] auto group_by(std::string_view columns)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" GROUP BY {}", columns)
+            );
+        }
+        
+        [[nodiscard]] auto having(std::string_view condition)
+            requires (SelectQuery<State> && HasFrom<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" HAVING {}", condition)
+            );
+        }
+        
+        // ========================================================================
+        // RETURNING clause (INSERT, UPDATE, DELETE)
+        // ========================================================================
+        
+        [[nodiscard]] auto returning(std::string_view columns)
+            requires (InsertQuery<State> || UpdateQuery<State> || DeleteQuery<State>) {
+            return typed_query_builder<State>(
+                conn_,
+                query_ + std::format(" RETURNING {}", columns)
+            );
+        }
+        
+        // ========================================================================
+        // Execution (only allowed when query is complete)
+        // ========================================================================
+        
+        [[nodiscard]] query_result execute() requires CanExecute<State> {
+            auto result = conn_.execute(query_);
+            return query_result(result);
+        }
+        
+        template<typename... Args>
+        [[nodiscard]] query_result execute(Args&&... args) requires CanExecute<State> {
+            auto result = conn_.execute_params(query_, std::forward<Args>(args)...);
+            return query_result(result);
+        }
+        
+        template<typename... Args>
+        [[nodiscard]] net::awaitable<query_result> execute_async(Args&&... args)
+            requires CanExecute<State> {
+            co_return co_await conn_.async_execute_params(query_, std::forward<Args>(args)...);
+        }
+        
+        // ========================================================================
+        // Direct SQL (bypass builder validation)
+        // ========================================================================
+        
+        [[nodiscard]] static query_result raw(database_connection& conn, std::string_view sql) {
+            auto result = conn.execute(sql);
+            return query_result(result);
+        }
+        
+        template<typename... Args>
+        [[nodiscard]] static query_result raw_params(database_connection& conn,
+                                                     std::string_view sql, Args&&... args) {
+            auto result = conn.execute_params(sql, std::forward<Args>(args)...);
+            return query_result(result);
+        }
+        
+        // ========================================================================
+        // Query inspection
+        // ========================================================================
+        
+        [[nodiscard]] const std::string& get_query() const noexcept {
+            return query_;
+        }
+        
+        [[nodiscard]] std::string_view query_type_name() const noexcept {
+            if constexpr (SelectQuery<State>) return "SELECT";
+            else if constexpr (InsertQuery<State>) return "INSERT";
+            else if constexpr (UpdateQuery<State>) return "UPDATE";
+            else if constexpr (DeleteQuery<State>) return "DELETE";
+            else return "NONE";
+        }
+        
+    private:
+        database_connection& conn_;
+        std::string query_;
+    };
+    
+    // ============================================================================
+    // Legacy Query Builder (backward compatible, no compile-time checks)
+    // ============================================================================
+    
     class database_query {
     public:
         explicit database_query(database_connection& conn) : conn_(conn) {}
@@ -187,6 +532,26 @@ namespace fenrir {
         // Build and execute query
         database_query& select(std::string_view columns) {
             query_ = std::format("SELECT {}", columns);
+            return *this;
+        }
+
+        database_query& insert_into(std::string_view table, std::string_view columns) {
+            query_ = std::format("INSERT INTO {} ({})", table, columns);
+            return *this;
+        }
+
+        database_query& update(std::string_view table) {
+            query_ = std::format("UPDATE {}", table);
+            return *this;
+        }
+
+        database_query& set(std::string_view assignments) {
+            query_ += std::format(" SET {}", assignments);
+            return *this;
+        }
+
+        database_query& delete_from(std::string_view table) {
+            query_ = std::format("DELETE FROM {}", table);
             return *this;
         }
 
@@ -228,6 +593,16 @@ namespace fenrir {
 
         database_query& offset(int count) {
             query_ += std::format(" OFFSET {}", count);
+            return *this;
+        }
+
+        database_query& join(std::string_view table, std::string_view condition, std::string_view type = "INNER") {
+            query_ += std::format(" {} JOIN {} ON {}", type, table, condition);
+            return *this;
+        }
+
+        database_query& group_by(std::string_view columns) {
+            query_ += std::format(" GROUP BY {}", columns);
             return *this;
         }
 

@@ -11,7 +11,8 @@ A modern, header-only C++20 wrapper for PostgreSQL's libpq library, featuring ex
 - `std::format` for string formatting
 - Designated initializers for clean configuration
 - **Coroutines for async operations** ⚡
-- **Unified file structure** - Single header for sync/async ⚡ NEW!
+- **Unified file structure** - Single header for sync/async ⚡
+- **Type-safe query builder** - Compile-time SQL validation ⚡ NEW!
 
 🔒 **RAII Resource Management**
 - Automatic connection cleanup
@@ -450,6 +451,7 @@ auto [r1, r2, r3] = co_await std::tuple{task1, task2, task3};
 ### Query Builder Pattern
 
 ```cpp
+// Legacy builder (runtime validation)
 database_query query(conn);
 
 auto result = query.select("name, email, age")
@@ -470,6 +472,44 @@ for (int row : result) {
     }
 }
 ```
+
+### Type-Safe Query Builder (NEW!) ⚡
+
+Compile-time validated query construction using C++20 concepts:
+
+```cpp
+// Type-safe builder (compile-time validation)
+typed_query_builder builder(conn);
+
+// ✅ This compiles - correct order
+auto result = builder.select("name, email, age")
+                   .from("users")
+                   .where("age >= 18")
+                   .order_by("age", false)
+                   .limit(10)
+                   .execute();
+
+// ❌ This won't compile - execute() before from()
+// auto bad = builder.select("*").execute();  // Compile error!
+
+// ❌ This won't compile - from() called twice
+// auto bad = builder.select("*").from("users").from("orders");  // Compile error!
+```
+
+**Benefits:**
+- 🛡️ **Compile-Time Safety**: Catch query construction errors before runtime
+- 🎯 **Better IDE Support**: Smart autocomplete knows valid methods
+- ⚡ **Zero Overhead**: All validation compiled away (same performance)
+- 📖 **Self-Documenting**: Type system enforces correct patterns
+- ✅ **Backward Compatible**: Legacy `database_query` still works
+
+**Supported Query Types:**
+- `SELECT` - Must have `from()` before `execute()`
+- `INSERT` - Must have `values()` before `execute()`
+- `UPDATE` - Must have `set()` before `execute()`
+- `DELETE` - Can `execute()` immediately after `delete_from()`
+
+**See [TYPED_QUERY_BUILDER.md](docs/TYPED_QUERY_BUILDER.md) for comprehensive documentation.**
 
 ### Transactions
 
@@ -959,7 +999,15 @@ Built on top of PostgreSQL's excellent libpq library. Designed to leverage moder
 
 ## 🎉 Recent Improvements
 
-### v2.1 - Unified Architecture (Latest)
+### v2.2 - Type-Safe Query Builder (Latest) ⚡ NEW!
+- ✅ **Compile-Time Validation**: C++20 concepts enforce correct query construction
+- ✅ **State Tracking**: Template-based state machine validates method order
+- ✅ **Zero Overhead**: All checks compile away (same runtime performance)
+- ✅ **Better IDE Support**: Autocomplete knows which methods are valid
+- ✅ **Comprehensive Rules**: SELECT requires FROM, INSERT requires VALUES, UPDATE requires SET
+- ✅ **Backward Compatible**: Legacy `database_query` unchanged
+
+### v2.1 - Unified Architecture
 - ✅ **Single Header**: Merged `database_connection.hpp` and `database_connection_async.hpp`
 - ✅ **Zero Circular Dependencies**: Clean include ordering with forward declarations
 - ✅ **Better Organization**: Class declarations + implementations in logical sections
