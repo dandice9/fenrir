@@ -1,6 +1,6 @@
 #pragma once
 
-#include "database_connection.hpp"
+#include <libpq-fe.h>
 #include <memory>
 #include <optional>
 #include <vector>

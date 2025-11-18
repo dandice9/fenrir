@@ -234,34 +234,33 @@ namespace fenrir {
         }
 
         // === ASYNC METHODS (require io_context) ===
-        // Implementations in database_connection_async.hpp to avoid circular dependency
         
         // Set io_context for async operations
         void set_io_context(net::io_context& ioc) noexcept {
             ioc_ = &ioc;
         }
 
-        // Async query execution using coroutines
-        [[nodiscard]] net::awaitable<query_result> async_execute(std::string_view query);
-
-        // Async parameterized query execution
-        template<typename... Args>
-        [[nodiscard]] net::awaitable<query_result> async_execute_params(
-            std::string_view query, Args&&... args);
-
-        // Async prepare statement
-        [[nodiscard]] net::awaitable<void> async_prepare(
-            std::string_view name, std::string_view query);
-
-        // Async execute prepared statement
-        template<typename... Args>
-        [[nodiscard]] net::awaitable<query_result> async_execute_prepared(
-            std::string_view name, Args&&... args);
-
         // Get the io_context (if set)
         [[nodiscard]] net::io_context* get_io_context() noexcept {
             return ioc_;
         }
+
+        // Async query execution using coroutines (implementation below class definition)
+        [[nodiscard]] net::awaitable<query_result> async_execute(std::string_view query);
+
+        // Async parameterized query execution (implementation below class definition)
+        template<typename... Args>
+        [[nodiscard]] net::awaitable<query_result> async_execute_params(
+            std::string_view query, Args&&... args);
+
+        // Async prepare statement (implementation below class definition)
+        [[nodiscard]] net::awaitable<void> async_prepare(
+            std::string_view name, std::string_view query);
+
+        // Async execute prepared statement (implementation below class definition)
+        template<typename... Args>
+        [[nodiscard]] net::awaitable<query_result> async_execute_prepared(
+            std::string_view name, Args&&... args);
 
     private:
         void connect(std::string_view conn_str) {
@@ -348,5 +347,141 @@ namespace fenrir {
         PGconn* conn_{nullptr};
         net::io_context* ioc_{nullptr};
     };
+
+} // namespace fenrir
+
+// Include query_result definition before async implementations
+#include "database_query.hpp"
+
+namespace fenrir {
+
+    // ============================================================================
+    // ASYNC METHOD IMPLEMENTATIONS
+    // ============================================================================
+    // These are defined after query_result is fully available
+    
+    inline net::awaitable<query_result> database_connection::async_execute(std::string_view query) {
+        if (!is_connected()) {
+            throw database_error{"Connection is not valid"};
+        }
+        if (!ioc_) {
+            throw database_error{"io_context not set. Call set_io_context() first."};
+        }
+
+        // Send query asynchronously
+        if (!PQsendQuery(native_handle(), query.data())) {
+            throw database_error{
+                std::format("Failed to send async query: {}", last_error())
+            };
+        }
+
+        // Wait for result asynchronously
+        co_return query_result(co_await wait_for_result());
+    }
+
+    template<typename... Args>
+    inline net::awaitable<query_result> database_connection::async_execute_params(
+        std::string_view query, Args&&... args) {
+        
+        if (!is_connected()) {
+            throw database_error{"Connection is not valid"};
+        }
+        if (!ioc_) {
+            throw database_error{"io_context not set. Call set_io_context() first."};
+        }
+
+        std::vector<std::string> param_values;
+        std::vector<const char*> param_ptrs;
+        
+        (param_values.push_back(to_string(std::forward<Args>(args))), ...);
+        
+        for (const auto& val : param_values) {
+            param_ptrs.push_back(val.c_str());
+        }
+
+        // Send parameterized query asynchronously
+        if (!PQsendQueryParams(
+            native_handle(),
+            query.data(),
+            static_cast<int>(param_ptrs.size()),
+            nullptr,
+            param_ptrs.data(),
+            nullptr,
+            nullptr,
+            0)) {
+            throw database_error{
+                std::format("Failed to send async parameterized query: {}", last_error())
+            };
+        }
+
+        // Wait for result asynchronously
+        co_return query_result(co_await wait_for_result());
+    }
+
+    inline net::awaitable<void> database_connection::async_prepare(
+        std::string_view name, std::string_view query) {
+        
+        if (!is_connected()) {
+            throw database_error{"Connection is not valid"};
+        }
+        if (!ioc_) {
+            throw database_error{"io_context not set. Call set_io_context() first."};
+        }
+
+        if (!PQsendPrepare(native_handle(), name.data(), query.data(), 0, nullptr)) {
+            throw database_error{
+                std::format("Failed to send async prepare: {}", last_error())
+            };
+        }
+
+        // Wait for prepare to complete
+        PGresult* result = co_await wait_for_result();
+        
+        ExecStatusType status = PQresultStatus(result);
+        if (status != PGRES_COMMAND_OK) {
+            std::string error_msg = PQresultErrorMessage(result);
+            PQclear(result);
+            throw database_error{std::move(error_msg)};
+        }
+        
+        PQclear(result);
+        co_return;
+    }
+
+    template<typename... Args>
+    inline net::awaitable<query_result> database_connection::async_execute_prepared(
+        std::string_view name, Args&&... args) {
+        
+        if (!is_connected()) {
+            throw database_error{"Connection is not valid"};
+        }
+        if (!ioc_) {
+            throw database_error{"io_context not set. Call set_io_context() first."};
+        }
+
+        std::vector<std::string> param_values;
+        std::vector<const char*> param_ptrs;
+        
+        (param_values.push_back(to_string(std::forward<Args>(args))), ...);
+        
+        for (const auto& val : param_values) {
+            param_ptrs.push_back(val.c_str());
+        }
+
+        if (!PQsendQueryPrepared(
+            native_handle(),
+            name.data(),
+            static_cast<int>(param_ptrs.size()),
+            param_ptrs.data(),
+            nullptr,
+            nullptr,
+            0)) {
+            throw database_error{
+                std::format("Failed to send async prepared query: {}", last_error())
+            };
+        }
+
+        co_return query_result(co_await wait_for_result());
+    }
 
 } // namespace fenrir

@@ -41,7 +41,6 @@
 // Core components
 #include "database_connection.hpp"
 #include "database_query.hpp"
-#include "database_connection_async.hpp"  // Async method implementations
 #include "database_transaction.hpp"
 #include "database_pool.hpp"
 #include "database_stored_procedure.hpp"
