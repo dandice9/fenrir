@@ -259,16 +259,27 @@ namespace fenrir {
 
     // ============================================================================
     // Type-Safe Query Builder with Compile-Time Validation
+    // Safe version that can work with both references and shared pointers
     // ============================================================================
     
     template<typename State = initial_query_state>
     class typed_query_builder {
     public:
-        explicit typed_query_builder(database_connection& conn) : conn_(conn) {}
+        // Constructor taking reference (caller must ensure connection outlives query)
+        explicit typed_query_builder(database_connection& conn) 
+            : conn_ptr_(nullptr), conn_ref_(&conn) {}
         
-        // Copy state for chaining
+        // Constructor taking shared_ptr (safer for async operations)
+        explicit typed_query_builder(std::shared_ptr<database_connection> conn)
+            : conn_ptr_(std::move(conn)), conn_ref_(nullptr) {}
+        
+        // Copy state for chaining (reference version)
         typed_query_builder(database_connection& conn, std::string query)
-            : conn_(conn), query_(std::move(query)) {}
+            : conn_ptr_(nullptr), conn_ref_(&conn), query_(std::move(query)) {}
+
+        // Copy state for chaining (shared_ptr version)
+        typed_query_builder(std::shared_ptr<database_connection> conn, std::string query)
+            : conn_ptr_(std::move(conn)), conn_ref_(nullptr), query_(std::move(query)) {}
         
         // ========================================================================
         // Query Starters (only allowed when no query started)
@@ -277,8 +288,14 @@ namespace fenrir {
         // Start SELECT query
         [[nodiscard]] auto select(std::string_view columns) requires NoQueryStarted<State> {
             using new_state = query_state<select_query_tag, false, false, false, false>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_, 
+                    std::format("SELECT {}", columns)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_, 
+                *conn_ref_, 
                 std::format("SELECT {}", columns)
             );
         }
@@ -287,8 +304,14 @@ namespace fenrir {
         [[nodiscard]] auto insert_into(std::string_view table, std::string_view columns) 
             requires NoQueryStarted<State> {
             using new_state = query_state<insert_query_tag, false, false, false, false>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_,
+                    std::format("INSERT INTO {} ({})", table, columns)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_,
+                *conn_ref_,
                 std::format("INSERT INTO {} ({})", table, columns)
             );
         }
@@ -296,8 +319,14 @@ namespace fenrir {
         // Start UPDATE query
         [[nodiscard]] auto update(std::string_view table) requires NoQueryStarted<State> {
             using new_state = query_state<update_query_tag, false, false, false, false>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_,
+                    std::format("UPDATE {}", table)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_,
+                *conn_ref_,
                 std::format("UPDATE {}", table)
             );
         }
@@ -305,8 +334,14 @@ namespace fenrir {
         // Start DELETE query
         [[nodiscard]] auto delete_from(std::string_view table) requires NoQueryStarted<State> {
             using new_state = query_state<delete_query_tag, true, false, false, false>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_,
+                    std::format("DELETE FROM {}", table)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_,
+                *conn_ref_,
                 std::format("DELETE FROM {}", table)
             );
         }
@@ -318,8 +353,14 @@ namespace fenrir {
         [[nodiscard]] auto from(std::string_view table) requires CanAddFrom<State> {
             using new_state = query_state<typename State::query_type, true, 
                                          State::has_where, State::has_set, State::has_values>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_,
+                    query_ + std::format(" FROM {}", table)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" FROM {}", table)
             );
         }
@@ -331,8 +372,14 @@ namespace fenrir {
         [[nodiscard]] auto set(std::string_view assignments) requires CanAddSet<State> {
             using new_state = query_state<typename State::query_type, true,
                                          State::has_where, true, State::has_values>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_,
+                    query_ + std::format(" SET {}", assignments)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" SET {}", assignments)
             );
         }
@@ -344,8 +391,14 @@ namespace fenrir {
         [[nodiscard]] auto values(std::string_view value_list) requires CanAddValues<State> {
             using new_state = query_state<typename State::query_type, true,
                                          State::has_where, State::has_set, true>;
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(
+                    conn_ptr_,
+                    query_ + std::format(" VALUES ({})", value_list)
+                );
+            }
             return typed_query_builder<new_state>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" VALUES ({})", value_list)
             );
         }
@@ -365,7 +418,10 @@ namespace fenrir {
                 new_query += " AND ";
             }
             new_query += condition;
-            return typed_query_builder<new_state>(conn_, std::move(new_query));
+            if (conn_ptr_) {
+                return typed_query_builder<new_state>(conn_ptr_, std::move(new_query));
+            }
+            return typed_query_builder<new_state>(*conn_ref_, std::move(new_query));
         }
         
         // ========================================================================
@@ -374,8 +430,14 @@ namespace fenrir {
         
         [[nodiscard]] auto order_by(std::string_view column, bool ascending = true)
             requires (SelectQuery<State> && HasFrom<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" ORDER BY {} {}", column, ascending ? "ASC" : "DESC")
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" ORDER BY {} {}", column, ascending ? "ASC" : "DESC")
             );
         }
@@ -385,15 +447,27 @@ namespace fenrir {
         // ========================================================================
         
         [[nodiscard]] auto limit(int count) requires (SelectQuery<State> && HasFrom<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" LIMIT {}", count)
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" LIMIT {}", count)
             );
         }
         
         [[nodiscard]] auto offset(int count) requires (SelectQuery<State> && HasFrom<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" OFFSET {}", count)
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" OFFSET {}", count)
             );
         }
@@ -405,8 +479,14 @@ namespace fenrir {
         [[nodiscard]] auto join(std::string_view table, std::string_view condition, 
                                std::string_view type = "INNER")
             requires (SelectQuery<State> && HasFrom<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" {} JOIN {} ON {}", type, table, condition)
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" {} JOIN {} ON {}", type, table, condition)
             );
         }
@@ -437,16 +517,28 @@ namespace fenrir {
         
         [[nodiscard]] auto group_by(std::string_view columns)
             requires (SelectQuery<State> && HasFrom<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" GROUP BY {}", columns)
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" GROUP BY {}", columns)
             );
         }
         
         [[nodiscard]] auto having(std::string_view condition)
             requires (SelectQuery<State> && HasFrom<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" HAVING {}", condition)
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" HAVING {}", condition)
             );
         }
@@ -457,8 +549,14 @@ namespace fenrir {
         
         [[nodiscard]] auto returning(std::string_view columns)
             requires (InsertQuery<State> || UpdateQuery<State> || DeleteQuery<State>) {
+            if (conn_ptr_) {
+                return typed_query_builder<State>(
+                    conn_ptr_,
+                    query_ + std::format(" RETURNING {}", columns)
+                );
+            }
             return typed_query_builder<State>(
-                conn_,
+                *conn_ref_,
                 query_ + std::format(" RETURNING {}", columns)
             );
         }
@@ -468,20 +566,23 @@ namespace fenrir {
         // ========================================================================
         
         [[nodiscard]] query_result execute() requires CanExecute<State> {
-            auto result = conn_.execute(query_);
+            auto& conn = get_connection();
+            auto result = conn.execute(query_);
             return query_result(result);
         }
         
         template<typename... Args>
         [[nodiscard]] query_result execute(Args&&... args) requires CanExecute<State> {
-            auto result = conn_.execute_params(query_, std::forward<Args>(args)...);
+            auto& conn = get_connection();
+            auto result = conn.execute_params(query_, std::forward<Args>(args)...);
             return query_result(result);
         }
         
         template<typename... Args>
         [[nodiscard]] net::awaitable<query_result> execute_async(Args&&... args)
             requires CanExecute<State> {
-            co_return co_await conn_.async_execute_params(query_, std::forward<Args>(args)...);
+            auto& conn = get_connection();
+            co_return co_await conn.async_execute_params(query_, std::forward<Args>(args)...);
         }
         
         // ========================================================================
@@ -515,19 +616,70 @@ namespace fenrir {
             else if constexpr (DeleteQuery<State>) return "DELETE";
             else return "NONE";
         }
+
+        // Check if connection is valid
+        [[nodiscard]] bool has_valid_connection() const noexcept {
+            if (conn_ptr_) return conn_ptr_->is_connected();
+            if (conn_ref_) return conn_ref_->is_connected();
+            return false;
+        }
         
     private:
-        database_connection& conn_;
+        // Get the underlying connection reference
+        [[nodiscard]] database_connection& get_connection() {
+            if (conn_ptr_) return *conn_ptr_;
+            if (conn_ref_) return *conn_ref_;
+            throw database_error{"No valid database connection"};
+        }
+
+        [[nodiscard]] const database_connection& get_connection() const {
+            if (conn_ptr_) return *conn_ptr_;
+            if (conn_ref_) return *conn_ref_;
+            throw database_error{"No valid database connection"};
+        }
+
+        std::shared_ptr<database_connection> conn_ptr_;  // Owned connection (for async safety)
+        database_connection* conn_ref_;                   // Non-owned reference (legacy usage)
         std::string query_;
     };
     
     // ============================================================================
     // Legacy Query Builder (backward compatible, no compile-time checks)
+    // Safe version that can work with both references and shared pointers
     // ============================================================================
     
     class database_query {
     public:
-        explicit database_query(database_connection& conn) : conn_(conn) {}
+        // Constructor taking reference (caller must ensure connection outlives query)
+        explicit database_query(database_connection& conn) 
+            : conn_ptr_(nullptr), conn_ref_(&conn) {}
+        
+        // Constructor taking shared_ptr (safer for async operations)
+        explicit database_query(std::shared_ptr<database_connection> conn) 
+            : conn_ptr_(std::move(conn)), conn_ref_(nullptr) {}
+
+        // Move constructor
+        database_query(database_query&& other) noexcept
+            : conn_ptr_(std::move(other.conn_ptr_)),
+              conn_ref_(other.conn_ref_),
+              query_(std::move(other.query_)) {
+            other.conn_ref_ = nullptr;
+        }
+
+        // Move assignment
+        database_query& operator=(database_query&& other) noexcept {
+            if (this != &other) {
+                conn_ptr_ = std::move(other.conn_ptr_);
+                conn_ref_ = other.conn_ref_;
+                query_ = std::move(other.query_);
+                other.conn_ref_ = nullptr;
+            }
+            return *this;
+        }
+
+        // Disable copy (connection ownership is complex)
+        database_query(const database_query&) = delete;
+        database_query& operator=(const database_query&) = delete;
 
         // Build and execute query
         database_query& select(std::string_view columns) {
@@ -608,28 +760,32 @@ namespace fenrir {
 
         // Execute the built query
         [[nodiscard]] query_result execute() {
-            auto result = conn_.execute(query_);
+            auto& conn = get_connection();
+            auto result = conn.execute(query_);
             return query_result(result);
         }
 
         // Execute with parameters
         template<typename... Args>
         [[nodiscard]] query_result execute(Args&&... args) {
-            auto result = conn_.execute_params(query_, std::forward<Args>(args)...);
+            auto& conn = get_connection();
+            auto result = conn.execute_params(query_, std::forward<Args>(args)...);
             return query_result(result);
         }
 
         // Execute with parameters asynchronously
         template<typename... Args>
         [[nodiscard]] net::awaitable<query_result> execute_async(Args&&... args) {
-            auto result = co_await conn_.async_execute_params(
+            auto& conn = get_connection();
+            auto result = co_await conn.async_execute_params(
                 query_, std::forward<Args>(args)...);
             co_return result;
         }
 
         // Direct SQL execution
         [[nodiscard]] query_result raw(std::string_view sql) {
-            auto result = conn_.execute(sql);
+            auto& conn = get_connection();
+            auto result = conn.execute(sql);
             return query_result(result);
         }
 
@@ -637,7 +793,8 @@ namespace fenrir {
         template<typename... Args>
         [[nodiscard]] query_result raw_params(
             std::string_view sql, Args&&... args) {
-            auto result = conn_.execute_params(sql, std::forward<Args>(args)...);
+            auto& conn = get_connection();
+            auto result = conn.execute_params(sql, std::forward<Args>(args)...);
             return query_result(result);
         }
 
@@ -652,8 +809,29 @@ namespace fenrir {
             return *this;
         }
 
+        // Check if connection is valid
+        [[nodiscard]] bool has_valid_connection() const noexcept {
+            if (conn_ptr_) return conn_ptr_->is_connected();
+            if (conn_ref_) return conn_ref_->is_connected();
+            return false;
+        }
+
     private:
-        database_connection& conn_;
+        // Get the underlying connection reference
+        [[nodiscard]] database_connection& get_connection() {
+            if (conn_ptr_) return *conn_ptr_;
+            if (conn_ref_) return *conn_ref_;
+            throw database_error{"No valid database connection"};
+        }
+
+        [[nodiscard]] const database_connection& get_connection() const {
+            if (conn_ptr_) return *conn_ptr_;
+            if (conn_ref_) return *conn_ref_;
+            throw database_error{"No valid database connection"};
+        }
+
+        std::shared_ptr<database_connection> conn_ptr_;  // Owned connection (for async safety)
+        database_connection* conn_ref_;                   // Non-owned reference (legacy usage)
         std::string query_;
     };
 

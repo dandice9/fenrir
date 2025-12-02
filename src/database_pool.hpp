@@ -11,18 +11,22 @@
 #include <thread>
 #include <semaphore>
 #include <functional>
+#include <iostream>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/post.hpp>
 
 namespace fenrir {
 
-    // RAII connection handle from pool
+    // RAII connection handle from pool with auto-reconnect capability
     class pooled_connection {
     public:
         pooled_connection() = default;
         
         pooled_connection(std::unique_ptr<database_connection> conn,
-                         std::function<void(std::unique_ptr<database_connection>)> returner)
-            : conn_(std::move(conn)), returner_(std::move(returner)) {}
+                         std::function<void(std::unique_ptr<database_connection>)> returner,
+                         std::function<std::unique_ptr<database_connection>()> reconnector = nullptr)
+            : conn_(std::move(conn)), returner_(std::move(returner)), reconnector_(std::move(reconnector)) {}
 
         ~pooled_connection() {
             if (conn_ && returner_) {
@@ -35,7 +39,9 @@ namespace fenrir {
         pooled_connection& operator=(const pooled_connection&) = delete;
         
         pooled_connection(pooled_connection&& other) noexcept
-            : conn_(std::move(other.conn_)), returner_(std::move(other.returner_)) {}
+            : conn_(std::move(other.conn_)), 
+              returner_(std::move(other.returner_)),
+              reconnector_(std::move(other.reconnector_)) {}
         
         pooled_connection& operator=(pooled_connection&& other) noexcept {
             if (this != &other) {
@@ -44,6 +50,7 @@ namespace fenrir {
                 }
                 conn_ = std::move(other.conn_);
                 returner_ = std::move(other.returner_);
+                reconnector_ = std::move(other.reconnector_);
             }
             return *this;
         }
@@ -56,9 +63,82 @@ namespace fenrir {
         [[nodiscard]] bool valid() const noexcept { return conn_ != nullptr; }
         explicit operator bool() const noexcept { return valid(); }
 
+        // Check if connection is healthy
+        [[nodiscard]] bool is_healthy() const noexcept {
+            return conn_ && conn_->is_connected();
+        }
+
+        // Attempt to reconnect if connection is dead
+        bool try_reconnect() {
+            if (!reconnector_) return false;
+            
+            try {
+                // First try to reset existing connection
+                if (conn_) {
+                    try {
+                        conn_->reset();
+                        if (conn_->is_connected()) {
+                            return true;
+                        }
+                    } catch (...) {
+                        // Reset failed, will create new connection
+                    }
+                }
+                
+                // Create fresh connection
+                conn_ = reconnector_();
+                return conn_ && conn_->is_connected();
+            } catch (const std::exception& e) {
+                std::cerr << "Reconnection failed: " << e.what() << std::endl;
+                return false;
+            }
+        }
+
+        // Execute with automatic retry on connection error
+        template<typename Func>
+        auto execute_with_retry(Func&& func, int max_retries = 2) -> decltype(func(std::declval<database_connection&>())) {
+            int attempts = 0;
+            while (true) {
+                try {
+                    if (!is_healthy()) {
+                        if (!try_reconnect()) {
+                            throw database_error{"Connection lost and reconnection failed"};
+                        }
+                    }
+                    return func(*conn_);
+                } catch (const database_error& e) {
+                    ++attempts;
+                    std::string error_msg = e.what();
+                    
+                    // Check if this is a recoverable connection error
+                    bool is_connection_error = 
+                        error_msg.find("connection") != std::string::npos ||
+                        error_msg.find("server closed") != std::string::npos ||
+                        error_msg.find("no connection") != std::string::npos ||
+                        error_msg.find("timeout") != std::string::npos ||
+                        !is_healthy();
+                    
+                    if (is_connection_error && attempts <= max_retries) {
+                        std::cerr << "Connection error (attempt " << attempts 
+                                  << "/" << max_retries << "): " << error_msg 
+                                  << ". Retrying..." << std::endl;
+                        
+                        if (!try_reconnect()) {
+                            throw database_error{
+                                std::format("Failed to reconnect after {} attempts: {}", 
+                                           attempts, error_msg)};
+                        }
+                        continue;  // Retry the operation
+                    }
+                    throw;  // Non-recoverable error or max retries exceeded
+                }
+            }
+        }
+
     private:
         std::unique_ptr<database_connection> conn_;
         std::function<void(std::unique_ptr<database_connection>)> returner_;
+        std::function<std::unique_ptr<database_connection>()> reconnector_;
     };
 
     // Thread-safe connection pool
@@ -138,11 +218,14 @@ namespace fenrir {
 
                     ++active_connections_;
                     
-                    // Return with custom deleter that returns to pool
+                    // Return with custom deleter that returns to pool and reconnector for auto-recovery
                     return pooled_connection(
                         std::move(conn),
                         [this](std::unique_ptr<database_connection> c) {
                             this->return_connection(std::move(c));
+                        },
+                        [this]() {
+                            return this->create_connection();
                         }
                     );
                 }
@@ -157,6 +240,9 @@ namespace fenrir {
                         std::move(conn),
                         [this](std::unique_ptr<database_connection> c) {
                             this->return_connection(std::move(c));
+                        },
+                        [this]() {
+                            return this->create_connection();
                         }
                     );
                 }
@@ -205,6 +291,68 @@ namespace fenrir {
         [[nodiscard]] bool is_shutdown() const {
             std::lock_guard<std::mutex> lock(mutex_);
             return shutdown_;
+        }
+
+        // Perform health check and cleanup of stale connections
+        // Returns number of connections removed/replaced
+        size_t maintain() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            
+            if (shutdown_) return 0;
+            
+            size_t removed = 0;
+            std::queue<std::unique_ptr<database_connection>> healthy_connections;
+            
+            // Check all available connections
+            while (!available_connections_.empty()) {
+                auto conn = std::move(available_connections_.front());
+                available_connections_.pop();
+                
+                if (conn && conn->is_connected()) {
+                    healthy_connections.push(std::move(conn));
+                } else {
+                    ++removed;
+                }
+            }
+            
+            available_connections_ = std::move(healthy_connections);
+            
+            // Replenish pool to minimum connections
+            size_t total = active_connections_ + available_connections_.size();
+            while (total < config_.min_connections) {
+                try {
+                    available_connections_.push(create_connection());
+                    ++total;
+                } catch (const database_error& e) {
+                    std::cerr << "Failed to replenish pool: " << e.what() << std::endl;
+                    break;
+                }
+            }
+            
+            return removed;
+        }
+
+        // Force refresh all available connections
+        void refresh_all() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            
+            if (shutdown_) return;
+            
+            // Clear all available connections
+            while (!available_connections_.empty()) {
+                available_connections_.pop();
+            }
+            
+            // Create fresh connections up to min_connections
+            for (size_t i = 0; i < config_.min_connections; ++i) {
+                try {
+                    available_connections_.push(create_connection());
+                } catch (const database_error& e) {
+                    std::cerr << "Failed to refresh connection: " << e.what() << std::endl;
+                }
+            }
+            
+            cv_.notify_all();
         }
 
     private:
