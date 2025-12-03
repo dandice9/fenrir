@@ -60,6 +60,13 @@ namespace fenrir {
         database_connection& operator*() { return *conn_; }
         const database_connection& operator*() const { return *conn_; }
 
+        database_query get_query_builder() {
+            if (!conn_) {
+                throw database_error{"No valid database connection"};
+            }
+            return database_query(*conn_);
+        }
+
         [[nodiscard]] bool valid() const noexcept { return conn_ != nullptr; }
         explicit operator bool() const noexcept { return valid(); }
 
