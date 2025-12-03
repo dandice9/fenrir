@@ -10,10 +10,12 @@
 #include <format>
 #include <source_location>
 #include <chrono>
+#include <iostream>
 #include <boost/asio.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/posix/stream_descriptor.hpp>
 #include <coroutine>
 
 namespace fenrir {
@@ -300,7 +302,7 @@ namespace fenrir {
             }
         }
 
-        // Wait for query result asynchronously using polling
+        // Wait for query result asynchronously using timer-based polling
         [[nodiscard]] net::awaitable<PGresult*> wait_for_result() {
             auto executor = co_await net::this_coro::executor;
             net::steady_timer timer(executor);
