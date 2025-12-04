@@ -15,7 +15,11 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/steady_timer.hpp>
+#ifdef _WIN32
+#include <boost/asio/windows/object_handle.hpp>
+#else
 #include <boost/asio/posix/stream_descriptor.hpp>
+#endif
 #include <coroutine>
 
 namespace fenrir {
@@ -302,11 +306,34 @@ namespace fenrir {
             }
         }
 
-        // Wait for query result asynchronously using timer-based polling
+        // Wait for query result asynchronously using socket-based waiting
+        // This is much more efficient than polling - it waits for actual socket activity
         [[nodiscard]] net::awaitable<PGresult*> wait_for_result() {
             auto executor = co_await net::this_coro::executor;
-            net::steady_timer timer(executor);
             
+            // Get the socket file descriptor from PostgreSQL connection
+            int socket_fd = PQsocket(native_handle());
+            if (socket_fd < 0) {
+                throw database_error{"Invalid socket from PostgreSQL connection"};
+            }
+
+#ifdef _WIN32
+            // On Windows, use a generic socket wrapper
+            // PQsocket returns a SOCKET (which is a UINT_PTR on Windows)
+            using socket_type = net::basic_stream_socket<net::ip::tcp>;
+            socket_type socket(executor, net::ip::tcp::v4(), static_cast<net::ip::tcp::socket::native_handle_type>(socket_fd));
+            
+            // Prevent the socket from being closed when our wrapper is destroyed
+            // PostgreSQL owns the socket
+            struct socket_guard {
+                socket_type& sock;
+                ~socket_guard() { sock.release(); }
+            } guard{socket};
+#else
+            // On POSIX, use stream_descriptor for efficient async I/O
+            net::posix::stream_descriptor socket(executor, ::dup(socket_fd));
+#endif
+
             while (true) {
                 // Check if result is ready (non-blocking)
                 if (PQconsumeInput(native_handle()) == 0) {
@@ -340,9 +367,9 @@ namespace fenrir {
                     co_return result;
                 }
 
-                // Wait a bit before polling again (1ms)
-                timer.expires_after(std::chrono::milliseconds(1));
-                co_await timer.async_wait(net::use_awaitable);
+                // Wait for socket to become readable - this is event-driven, not polling!
+                // The coroutine suspends until there's data available on the socket
+                co_await socket.async_wait(net::socket_base::wait_read, net::use_awaitable);
             }
         }
 
