@@ -15,11 +15,6 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/steady_timer.hpp>
-#ifdef _WIN32
-#include <boost/asio/windows/object_handle.hpp>
-#else
-#include <boost/asio/posix/stream_descriptor.hpp>
-#endif
 #include <coroutine>
 
 namespace fenrir {
@@ -312,27 +307,22 @@ namespace fenrir {
             auto executor = co_await net::this_coro::executor;
             
             // Get the socket file descriptor from PostgreSQL connection
-            int socket_fd = PQsocket(native_handle());
+            auto socket_fd = PQsocket(native_handle());
             if (socket_fd < 0) {
                 throw database_error{"Invalid socket from PostgreSQL connection"};
             }
 
-#ifdef _WIN32
-            // On Windows, use a generic socket wrapper
-            // PQsocket returns a SOCKET (which is a UINT_PTR on Windows)
-            using socket_type = net::basic_stream_socket<net::ip::tcp>;
-            socket_type socket(executor, net::ip::tcp::v4(), static_cast<net::ip::tcp::socket::native_handle_type>(socket_fd));
+            // Use tcp::socket for cross-platform socket wrapping
+            // This works on both Windows (SOCKET) and POSIX (int fd)
+            net::ip::tcp::socket socket(executor);
+            socket.assign(net::ip::tcp::v4(), socket_fd);
             
-            // Prevent the socket from being closed when our wrapper is destroyed
-            // PostgreSQL owns the socket
-            struct socket_guard {
-                socket_type& sock;
-                ~socket_guard() { sock.release(); }
-            } guard{socket};
-#else
-            // On POSIX, use stream_descriptor for efficient async I/O
-            net::posix::stream_descriptor socket(executor, ::dup(socket_fd));
-#endif
+            // RAII guard to release socket ownership back to PostgreSQL
+            // PostgreSQL owns the socket, we're just borrowing it for async waiting
+            struct socket_releaser {
+                net::ip::tcp::socket& sock;
+                ~socket_releaser() { sock.release(); }
+            } releaser{socket};
 
             while (true) {
                 // Check if result is ready (non-blocking)
