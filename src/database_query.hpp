@@ -713,6 +713,10 @@ namespace fenrir {
         }
 
         database_query& where(std::string_view condition) {
+            if(condition.empty()) {
+                return *this;
+            }
+
             if (query_.find(" WHERE ") == std::string::npos) {
                 query_ += " WHERE ";
             } else {
@@ -723,6 +727,10 @@ namespace fenrir {
         }
 
         database_query& where(std::string_view condition, auto&&... params) {
+            if(condition.empty()) {
+                return *this;
+            }
+
             if (query_.find(" WHERE ") == std::string::npos) {
                 query_ += " WHERE ";
             } else {
